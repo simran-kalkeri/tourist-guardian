@@ -1,190 +1,176 @@
-# Smart Tourist Safety Monitoring & Incident Response System
+# TouristGuardian — Smart Tourist Safety & Incident Response (SIH)
 
-A comprehensive full-stack application for monitoring tourist safety with blockchain integration, real-time location tracking, and emergency response capabilities.
+A full-stack system for tourist safety monitoring, SOS handling, and on-chain identity, built for Smart India Hackathon (SIH).
 
-## 🏗️ Architecture
+Stack: React + Node/Express + MongoDB + Solidity (Truffle/Ganache) + Leaflet with an IoT simulation for live movement.
 
-- **Backend**: Express.js with MongoDB
-- **Frontend**: React with Tailwind CSS
-- **Blockchain**: Solidity smart contracts with Truffle/Ganache
-- **Maps**: Leaflet for real-time location visualization
-- **Database**: MongoDB Atlas
-- **Real-time**: IoT simulation with automatic location updates
+## Overview
+- Blockchain identity: Every tourist gets a tamper-proof on-chain ID
+- Live map: Real-time location tracking via IoT simulation
+- SOS flow: Trigger, visualize, and resolve emergencies
+- Admin console: Monitor tourists, filter/search, manage alerts
+- Analytics: Basic KPIs, density heatmaps, SOS timelines
 
-## 🚀 Features
+## Architecture
+- Frontend: React (CRA) + Tailwind + Leaflet
+- Backend: Node/Express + MongoDB
+- Blockchain: Solidity + Truffle + Ganache (local dev)
+- Data: MongoDB Atlas (or local MongoDB)
+- Real-time: IoT simulator (server-side, 5s updates)
 
-### Tourist Registration
-- Secure registration with blockchain ID generation
-- Trip duration tracking with automatic cleanup
-- Emergency contact management
-- Document verification (Passport/Aadhaar)
+```
+├── backend/           # Express API & services
+├── frontend/          # React UI (Admin dashboard + map)
+├── blockchain/        # Truffle project (contracts, migrations)
+├── contracts/         # Solidity source
+└── migrations/        # Truffle deployment scripts
+```
 
-### Admin Dashboard
-- Real-time tourist monitoring
-- Interactive Leaflet maps with SOS alerts
-- Advanced analytics and charts
-- Search and filter capabilities
-- SOS alert management
+## Prerequisites
+- Node.js ≥ 16
+- npm ≥ 8
+- MongoDB Atlas (or local MongoDB)
+- Ganache (v7+): `npm i -g ganache`
+- Truffle: `npm i -g truffle`
 
-### Blockchain Integration
-- Decentralized tourist ID system
-- Immutable location tracking
-- Smart contract-based SOS alerts
-- Automated cleanup of expired records
+> Never commit real secrets. Use .env files locally and commit only .env.example.
 
-### IoT Simulation
-- Realistic location updates every 5 seconds
-- Random SOS trigger simulation
-- Configurable simulation parameters
-- Real-time data synchronization
+## Quick Start (Local Dev)
+### 1) Clone & install
+```
+git clone <your-repo-url>
+cd tourist-safety-system
 
-## 📦 Installation & Setup
-
-### Prerequisites
-- Node.js (v16+)
-- MongoDB Atlas account
-- Ganache CLI
-- Truffle Suite
-
-### Backend Setup
-\`\`\`bash
-cd backend
 npm install
-cp .env.example .env
-# Configure your MongoDB URI and other environment variables
-npm start
-\`\`\`
+cd backend && npm install && cd ..
+cd frontend && npm install && cd ..
+cd blockchain && npm install && cd ..
+```
 
-### Blockchain Setup
-\`\`\`bash
-# Install Ganache CLI globally
-npm install -g ganache-cli
+### 2) Start Ganache (deterministic, local-only)
+Use the same mnemonic across restarts so addresses/private keys stay stable.
+```
+ganache \
+  --wallet.mnemonic "bonus predict custom timber never advice casual glove predict hand burger away" \
+  --wallet.totalAccounts 10 \
+  --chain.chainId 1337 \
+  --port 8545 \
+  --host 127.0.0.1
+```
+> Do not use this mnemonic in production.
 
-# Start Ganache
-ganache-cli --deterministic --accounts 10 --host 0.0.0.0
-
-# Deploy contracts
+### 3) Deploy the smart contract (Truffle)
+```
 cd blockchain
-npm install
-truffle migrate --reset
-\`\`\`
+truffle migrate --reset --network development
+```
+Note the deployed contract address printed here.
 
-### Frontend Setup
-\`\`\`bash
-cd frontend
-npm install
+### 4) Configure environment (backend)
+Create `backend/.env` from the example and edit values:
+```
+cd backend
+cp .env.example .env
+```
+Set:
+- `MONGODB_URI`
+- `ADMIN_PRIVATE_KEY` (Ganache account[0] PK printed by Ganache)
+- `CONTRACT_ADDRESS` (from truffle migrate)
+- `BLOCKCHAIN_RPC_URL` (http://127.0.0.1:8545)
+
+### 5) Start the services
+Backend
+```
+cd backend
 npm start
-\`\`\`
+```
+Frontend
+```
+cd frontend
+npm run dev
+```
+Open http://localhost:3000
 
-## 🔧 Configuration
+## Configuration
+### Backend .env (see .env.example)
+- `PORT` (default 5000)
+- `MONGODB_URI`
+- `BLOCKCHAIN_RPC_URL` (e.g., http://127.0.0.1:8545)
+- `ADMIN_PRIVATE_KEY` (Ganache account[0] private key)
+- `CONTRACT_ADDRESS` (from Truffle deploy)
 
-### Environment Variables
+### Contract sync
+Each time you run `truffle migrate --reset`, update:
+- `CONTRACT_ADDRESS` in `.env`
+- If your backend uses a `deployment.json`, sync address + ABI there as well
 
-**Backend (.env)**
-\`\`\`
-PORT=5000
-MONGODB_URI=mongodb+srv://siteadmin:officer123@cluster0.l6busjy.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
-CONTRACT_ADDRESS=<deployed_contract_address>
-ADMIN_PRIVATE_KEY=<ganache_admin_private_key>
-BLOCKCHAIN_RPC_URL=http://localhost:8545
-\`\`\`
-
-**Frontend**
-- Update API endpoints in components to match your backend URL
-- Configure blockchain connection parameters
-
-## 🎯 Usage
-
-### Admin Access
+## Admin
+Demo creds (dev only) — change in production:
 - Username: `admin`
 - Password: `admin123`
 
-### API Endpoints
+## API Endpoints (sample)
+| Method | Endpoint                      | Description               |
+|-------:|-------------------------------|---------------------------|
+|   POST | /api/tourists/register        | Register new tourist      |
+|    GET | /api/tourists                 | List all tourists (admin) |
+|   POST | /api/tourists/:id/location    | Update tourist location   |
+|   POST | /api/tourists/:id/sos         | Trigger SOS               |
+|   POST | /api/tourists/:id/reset-sos   | Reset SOS (admin)         |
+|    GET | /api/wallet-queue/status      | Wallet queue status       |
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/tourists/register` | Register new tourist |
-| GET | `/api/tourists` | Get all tourists (Admin) |
-| POST | `/api/tourists/:id/location` | Update tourist location |
-| POST | `/api/tourists/:id/sos` | Trigger SOS alert |
-| POST | `/api/tourists/:id/reset-sos` | Reset SOS alert (Admin) |
-| POST | `/api/cleanup-expired` | Clean expired tourists |
+## Smart Contract (key functions)
+- `registerTourist(...)` → emits `TouristRegistered(id, ...)`
+- `updateLocation(uint id, int256 lat, int256 long)`
+- `triggerSOS(uint id)`
+- `resetSOS(uint id)` (admin)
+- `getTourist(uint id) view` (admin)
+- `getAllTourists() view` (admin)
+- `deleteTourist(uint id)` (admin, post-trip)
 
-### Smart Contract Functions
-- `registerTourist()` - Register new tourist on blockchain
-- `updateLocation()` - Update tourist location
-- `triggerSOS()` - Activate emergency alert
-- `resetSOS()` - Deactivate emergency alert (Admin only)
-- `deleteTourist()` - Remove expired tourist records
+## Map & Analytics
+- Live Map: 5s location updates, SOS markers, popups
+- Heatmap: density visualization
+- Analytics: active tourists, SOS count, areas
 
-## 🗺️ Map Features
+## Testing & IoT Simulation
+- IoT simulation runs server-side and updates locations every 5 seconds.
+- SOS events can be simulated randomly or via API.
 
-- **Real-time Location Tracking**: Live updates every 5 seconds
-- **SOS Alert Visualization**: Red markers for emergency situations
-- **Interactive Popups**: Tourist details and quick actions
-- **Heatmap Overlay**: Density visualization of tourist locations
-- **Auto-fitting Bounds**: Automatic map adjustment for optimal viewing
+## Security Notes
+- Do not commit real .env files or private keys.
+- Ganache mnemonic/keys are dev-only.
+- Validate inputs on both client & server.
+- Use role checks on admin-only endpoints.
 
-## 📊 Analytics Dashboard
+## Troubleshooting
+1) Admin wallet has 0 ETH
+- Start Ganache with the stable mnemonic above
+- Use Ganache account[0] private key in `ADMIN_PRIVATE_KEY`
+- Ensure `BLOCKCHAIN_RPC_URL` points to 127.0.0.1:8545
 
-- **Tourist Statistics**: Active count, SOS alerts, registrations
-- **Location Distribution**: Charts showing tourist density by area
-- **SOS Alert Timeline**: Historical emergency response data
-- **Real-time Monitoring**: Live updates with simulation controls
+2) BAD_DATA / could not decode result data (value="0x")
+- The backend is talking to a wrong address or ABI
+- Re-deploy, then update `CONTRACT_ADDRESS` and ABI where used
 
-## 🔒 Security Features
+3) Mongo error: E11000 duplicate key ... tokenId/digitalID: null
+- Legacy unique indexes exist from older schema
+- The backend now drops `tokenId_1`/`digitalID_1` on boot and enforces
+  unique indexes on `blockchainId` and `walletAddress`
 
-- **Blockchain Immutability**: Tamper-proof tourist records
-- **Admin Authentication**: Secure access to sensitive operations
-- **Data Validation**: Comprehensive input validation and sanitization
-- **Error Handling**: Robust error management and logging
+4) “Tourist X not registered on blockchain, skipping update”
+- Mongo entry exists, but not on-chain
+- Register on-chain or let the backend re-register and persist the id
 
-## 🧪 Testing
+## Roadmap
+- AuthN/AuthZ with JWT & RBAC
+- WebSocket live updates (replace polling)
+- On-chain event indexing for analytics
+- Geo-fencing & automated alerts
+- Offline-first mobile client
 
-The system includes IoT simulation for testing:
-- Automatic location updates for all registered tourists
-- Random SOS alert generation
-- Configurable simulation parameters
-- Real-time data synchronization
+## Contributing
+PRs welcome. Please open an issue first for major changes.
 
-## 📱 Responsive Design
+Built for Smart India Hackathon (SIH) 🏆
 
-- Mobile-first approach
-- Tailwind CSS for consistent styling
-- Professional government/enterprise UI
-- Accessibility compliance
-
-## 🔄 Real-time Updates
-
-- Frontend polls backend every 5 seconds
-- IoT simulation generates realistic data
-- Blockchain synchronization
-- Live map updates and notifications
-
-## 🛠️ Development
-
-### Project Structure
-\`\`\`
-├── backend/           # Express.js API server
-├── frontend/          # React application
-├── contracts/         # Solidity smart contracts
-├── blockchain/        # Truffle configuration and utilities
-└── migrations/        # Contract deployment scripts
-\`\`\`
-
-### Key Technologies
-- **Express.js**: RESTful API development
-- **React**: Modern frontend framework
-- **MongoDB**: Document database
-- **Solidity**: Smart contract development
-- **Leaflet**: Interactive maps
-- **Recharts**: Data visualization
-- **Tailwind CSS**: Utility-first styling
-
-## 📞 Support
-
-For issues or questions, refer to the comprehensive error handling and logging systems built into the application.
-
----
-
-**Built with precision for competition-winning performance** 🏆
