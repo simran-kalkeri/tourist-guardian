@@ -1,0 +1,16 @@
+{
+  "name": "tourist-blockchain",
+  "version": "1.0.0",
+  "description": "Blockchain integration for Tourist Safety System",
+  "main": "utils.js",
+  "scripts": {
+    "deploy": "node deploy.js",
+    "compile": "truffle compile",
+    "migrate": "truffle migrate --reset",
+    "test": "truffle test"
+  },
+  "dependencies": {
+    "ethers": "^6.8.1"
+  },
+  "keywords": ["blockchain", "ethereum", "smart-contracts"]
+}
