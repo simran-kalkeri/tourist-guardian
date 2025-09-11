@@ -1,0 +1,17 @@
+{
+  "generated_at": "2025-09-09T21:04:47.961860",
+  "num_tourists": 1000,
+  "num_events": 87315,
+  "num_features": 87315,
+  "config": {
+    "route_deviation_pct": 0.15,
+    "sudden_dropout_pct": 0.05,
+    "prolonged_inactivity_pct": 0.08,
+    "gps_noise_std": 0.0001,
+    "high_risk_area_pct": 0.1,
+    "medium_risk_area_pct": 0.2
+  },
+  "train_size": 61521,
+  "val_size": 13218,
+  "test_size": 12576
+}

@@ -1,0 +1,23 @@
+{
+  "safety_score": {
+    "train_rmse": 4.916341352502028,
+    "train_mae": 3.919808321458354,
+    "train_r2": 0.9359488214872841,
+    "val_rmse": 5.041452127366165,
+    "val_mae": 4.0113150056634295,
+    "val_r2": 0.933220185944241,
+    "test_rmse": 5.026129131245188,
+    "test_mae": 3.997769709302203,
+    "test_r2": 0.9364523167970682
+  },
+  "anomaly_detection": {
+    "isolation_forest_outlier_ratio": 0.09999837453877537,
+    "svm_outlier_ratio": 0.09999837453877537,
+    "if_score_mean": 0.07603742062327247,
+    "svm_score_mean": 104.07114918078352,
+    "test_critical_alerts": 263,
+    "test_warn_alerts": 737,
+    "test_total_alerts": 1000,
+    "test_alert_rate": 1.0
+  }
+}

@@ -4,7 +4,8 @@ import { useEffect, useState } from "react"
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
-import { MapPin, AlertTriangle, User, Phone, Calendar, Shield } from "lucide-react"
+// Removed external HeatmapLayer to avoid name conflict; using custom SimpleHeatmapLayer below
+import { MapPin, AlertTriangle, User, Phone, Calendar, Shield, AlertCircle, Map } from "lucide-react"
 
 // Fix for default markers in react-leaflet
 delete L.Icon.Default.prototype._getIconUrl
@@ -56,7 +57,7 @@ const MapUpdater = ({ tourists }) => {
 }
 
 // Heatmap effect component
-const HeatmapLayer = ({ tourists }) => {
+const SimpleHeatmapLayer = ({ tourists }) => {
   const map = useMap()
 
   useEffect(() => {
@@ -86,12 +87,100 @@ const HeatmapLayer = ({ tourists }) => {
   return null
 }
 
-const TouristMap = ({ tourists, onResetSOS }) => {
-  const [showHeatmap, setShowHeatmap] = useState(false)
+// Geofence and restricted zones component
+const GeofenceLayer = ({ tourists, alerts }) => {
+  const map = useMap()
 
-  // Default center (can be adjusted based on your region)
-  const defaultCenter = [28.6139, 77.209] // New Delhi coordinates
-  const defaultZoom = 10
+  useEffect(() => {
+    const geofenceLayer = L.layerGroup()
+
+    // Define restricted zones (demo data - in production, this would come from a database)
+    const restrictedZones = [
+      {
+        name: "High Security Area",
+        coordinates: [[28.6139, 77.209], [28.6149, 77.209], [28.6149, 77.219], [28.6139, 77.219], [28.6139, 77.209]],
+        riskLevel: "high",
+        description: "Government buildings and sensitive installations"
+      },
+      {
+        name: "Restricted Tourist Zone",
+        coordinates: [[28.6039, 77.199], [28.6049, 77.199], [28.6049, 77.209], [28.6039, 77.209], [28.6039, 77.199]],
+        riskLevel: "medium",
+        description: "Area with restricted access for tourists"
+      },
+      {
+        name: "Night Curfew Zone",
+        coordinates: [[28.6239, 77.219], [28.6249, 77.219], [28.6249, 77.229], [28.6239, 77.229], [28.6239, 77.219]],
+        riskLevel: "low",
+        description: "Area with night-time restrictions"
+      }
+    ]
+
+    // Add restricted zones
+    restrictedZones.forEach((zone) => {
+      const polygon = L.polygon(zone.coordinates, {
+        color: zone.riskLevel === "high" ? "#dc2626" : zone.riskLevel === "medium" ? "#f59e0b" : "#3b82f6",
+        fillColor: zone.riskLevel === "high" ? "#dc2626" : zone.riskLevel === "medium" ? "#f59e0b" : "#3b82f6",
+        fillOpacity: 0.2,
+        weight: 2,
+        dashArray: "5, 5"
+      })
+
+      polygon.bindPopup(`
+        <div class="p-2">
+          <h4 class="font-semibold text-gray-900">${zone.name}</h4>
+          <p class="text-sm text-gray-600 mt-1">${zone.description}</p>
+          <p class="text-xs text-gray-500 mt-2">
+            Risk Level: <span class="font-medium ${zone.riskLevel === "high" ? "text-red-600" : zone.riskLevel === "medium" ? "text-yellow-600" : "text-blue-600"}">${zone.riskLevel.toUpperCase()}</span>
+          </p>
+        </div>
+      `)
+
+      geofenceLayer.addLayer(polygon)
+    })
+
+    // Add geofence alerts
+    alerts.forEach((alert) => {
+      if (alert.type === "geofence_breach" && alert.latitude && alert.longitude) {
+        const alertMarker = L.circleMarker([alert.latitude, alert.longitude], {
+          color: "#dc2626",
+          fillColor: "#dc2626",
+          fillOpacity: 0.3,
+          radius: 8,
+          weight: 3
+        })
+
+        alertMarker.bindPopup(`
+          <div class="p-2">
+            <h4 class="font-semibold text-red-600">Geofence Alert</h4>
+            <p class="text-sm text-gray-600 mt-1">${alert.message}</p>
+            <p class="text-xs text-gray-500 mt-2">
+              Time: ${new Date(alert.timestamp).toLocaleString()}
+            </p>
+          </div>
+        `)
+
+        geofenceLayer.addLayer(alertMarker)
+      }
+    })
+
+    map.addLayer(geofenceLayer)
+
+    return () => {
+      map.removeLayer(geofenceLayer)
+    }
+  }, [tourists, alerts, map])
+
+  return null
+}
+
+const TouristMap = ({ tourists, onResetSOS, alerts = [] }) => {
+  const [showHeatmap, setShowHeatmap] = useState(false)
+  const [showGeofence, setShowGeofence] = useState(true)
+
+  // Default center (shifted to Northeast India; e.g., near Guwahati)
+  const defaultCenter = [26.2006, 92.9376]
+  const defaultZoom = 7
 
   // Filter tourists with valid coordinates
   const validTourists = tourists.filter((tourist) => tourist.latitude !== 0 && tourist.longitude !== 0)
@@ -176,16 +265,32 @@ const TouristMap = ({ tourists, onResetSOS }) => {
                 <div className="w-3 h-3 bg-red-600 rounded-full"></div>
                 <span className="text-gray-600">SOS ({validTourists.filter((t) => t.sosActive).length})</span>
               </div>
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 bg-orange-500 rounded-full"></div>
+                <span className="text-gray-600">Geofence Alerts ({alerts.filter(a => a.type === 'geofence_breach').length})</span>
+              </div>
             </div>
 
-            <button
-              onClick={() => setShowHeatmap(!showHeatmap)}
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                showHeatmap ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-              }`}
-            >
-              {showHeatmap ? "Hide" : "Show"} Heatmap
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowGeofence(!showGeofence)}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                  showGeofence ? "bg-orange-100 text-orange-700" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                <Map className="w-3 h-3 mr-1 inline" />
+                {showGeofence ? "Hide" : "Show"} Zones
+              </button>
+              
+              <button
+                onClick={() => setShowHeatmap(!showHeatmap)}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                  showHeatmap ? "bg-emerald-100 text-emerald-700" : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                {showHeatmap ? "Hide" : "Show"} Heatmap
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -214,7 +319,8 @@ const TouristMap = ({ tourists, onResetSOS }) => {
 
             <MapUpdater tourists={validTourists} />
 
-            {showHeatmap && <HeatmapLayer tourists={validTourists} />}
+            {showGeofence && <GeofenceLayer tourists={validTourists} alerts={alerts} />}
+            {showHeatmap && <SimpleHeatmapLayer tourists={validTourists} />}
 
             {validTourists.map((tourist) => (
               <Marker
@@ -245,6 +351,12 @@ const TouristMap = ({ tourists, onResetSOS }) => {
           <div>
             <p className="text-2xl font-bold text-red-600">{validTourists.filter((t) => t.sosActive).length}</p>
             <p className="text-sm text-gray-500">SOS Alerts</p>
+          </div>
+          <div>
+            <p className="text-2xl font-bold text-orange-600">
+              {alerts.filter(a => a.type === 'geofence_breach').length}
+            </p>
+            <p className="text-sm text-gray-500">Geofence Alerts</p>
           </div>
           <div>
             <p className="text-2xl font-bold text-blue-600">

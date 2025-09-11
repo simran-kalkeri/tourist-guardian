@@ -2,8 +2,11 @@
 
 import { useState } from "react"
 import { Shield, User, Calendar, Phone, MapPin, AlertCircle, CheckCircle } from "lucide-react"
+import { useLanguage } from "../contexts/LanguageContext"
 
 const TouristRegistration = () => {
+  const { t } = useLanguage()
+  
   const [formData, setFormData] = useState({
     name: "",
     aadharOrPassport: "",
@@ -21,29 +24,29 @@ const TouristRegistration = () => {
     const newErrors = {}
 
     if (!formData.name.trim()) {
-      newErrors.name = "Full name is required"
+      newErrors.name = t('required')
     }
 
     if (!formData.aadharOrPassport.trim()) {
-      newErrors.aadharOrPassport = "Aadhaar or Passport number is required"
+      newErrors.aadharOrPassport = t('required')
     } else if (formData.aadharOrPassport.length < 8) {
-      newErrors.aadharOrPassport = "Invalid document number"
+      newErrors.aadharOrPassport = t('invalidAadhar')
     }
 
     if (!formData.tripStart) {
-      newErrors.tripStart = "Trip start date is required"
+      newErrors.tripStart = t('required')
     }
 
     if (!formData.tripEnd) {
-      newErrors.tripEnd = "Trip end date is required"
+      newErrors.tripEnd = t('required')
     } else if (new Date(formData.tripEnd) <= new Date(formData.tripStart)) {
       newErrors.tripEnd = "End date must be after start date"
     }
 
     if (!formData.emergencyContact.trim()) {
-      newErrors.emergencyContact = "Emergency contact is required"
+      newErrors.emergencyContact = t('required')
     } else if (!/^\+?[\d\s-()]+$/.test(formData.emergencyContact)) {
-      newErrors.emergencyContact = "Invalid phone number format"
+      newErrors.emergencyContact = t('invalidPhone')
     }
 
     setErrors(newErrors)
@@ -82,10 +85,10 @@ const TouristRegistration = () => {
           emergencyContact: "",
         })
       } else {
-        setErrors({ submit: result.error || "Registration failed" })
+        setErrors({ submit: result.error || t('registrationError') })
       }
     } catch (error) {
-      setErrors({ submit: "Network error. Please try again." })
+      setErrors({ submit: t('registrationError') })
     } finally {
       setIsLoading(false)
     }
@@ -108,7 +111,7 @@ const TouristRegistration = () => {
           <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <CheckCircle className="w-8 h-8 text-green-600" />
           </div>
-          <h2 className="text-2xl font-bold text-gray-900 mb-2">Registration Successful!</h2>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">{t('registrationSuccess')}</h2>
           <p className="text-gray-600 mb-4">Your tourist safety ID has been generated</p>
 
           {registrationResult && (
@@ -141,7 +144,7 @@ const TouristRegistration = () => {
           <div className="flex items-center gap-3">
             <Shield className="w-8 h-8" />
             <div>
-              <h1 className="text-2xl font-bold">Tourist Safety Registration</h1>
+              <h1 className="text-2xl font-bold">{t('touristRegistration')}</h1>
               <p className="text-orange-100">Secure your journey with our monitoring system</p>
             </div>
           </div>
@@ -161,7 +164,7 @@ const TouristRegistration = () => {
                 <div className="space-y-4">
                   <div>
                     <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-2">
-                      Full Name *
+                      {t('name')} *
                     </label>
                     <input
                       type="text"
@@ -172,7 +175,7 @@ const TouristRegistration = () => {
                       className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition-colors ${
                         errors.name ? "border-red-500 bg-red-50" : "border-gray-300"
                       }`}
-                      placeholder="Enter your full name"
+                      placeholder={t('namePlaceholder')}
                     />
                     {errors.name && (
                       <p className="mt-1 text-sm text-red-600 flex items-center gap-1">
@@ -184,7 +187,7 @@ const TouristRegistration = () => {
 
                   <div>
                     <label htmlFor="aadharOrPassport" className="block text-sm font-medium text-gray-700 mb-2">
-                      Aadhaar / Passport Number *
+                      {t('aadharPassport')} *
                     </label>
                     <input
                       type="text"
@@ -195,7 +198,7 @@ const TouristRegistration = () => {
                       className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition-colors ${
                         errors.aadharOrPassport ? "border-red-500 bg-red-50" : "border-gray-300"
                       }`}
-                      placeholder="Enter document number"
+                      placeholder={t('aadharPassportPlaceholder')}
                     />
                     {errors.aadharOrPassport && (
                       <p className="mt-1 text-sm text-red-600 flex items-center gap-1">
@@ -211,12 +214,12 @@ const TouristRegistration = () => {
               <div>
                 <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <Phone className="w-5 h-5 text-orange-600" />
-                  Emergency Contact
+                  {t('emergencyContact')}
                 </h3>
 
                 <div>
                   <label htmlFor="emergencyContact" className="block text-sm font-medium text-gray-700 mb-2">
-                    Phone Number *
+                    {t('emergencyContact')} *
                   </label>
                   <input
                     type="tel"
@@ -227,7 +230,7 @@ const TouristRegistration = () => {
                     className={`w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition-colors ${
                       errors.emergencyContact ? "border-red-500 bg-red-50" : "border-gray-300"
                     }`}
-                    placeholder="+91 9876543210"
+                    placeholder={t('emergencyContactPlaceholder')}
                   />
                   {errors.emergencyContact && (
                     <p className="mt-1 text-sm text-red-600 flex items-center gap-1">
@@ -250,7 +253,7 @@ const TouristRegistration = () => {
                 <div className="space-y-4">
                   <div>
                     <label htmlFor="tripStart" className="block text-sm font-medium text-gray-700 mb-2">
-                      Trip Start Date *
+                      {t('tripStart')} *
                     </label>
                     <input
                       type="date"
@@ -273,7 +276,7 @@ const TouristRegistration = () => {
 
                   <div>
                     <label htmlFor="tripEnd" className="block text-sm font-medium text-gray-700 mb-2">
-                      Trip End Date *
+                      {t('tripEnd')} *
                     </label>
                     <input
                       type="date"
@@ -343,12 +346,12 @@ const TouristRegistration = () => {
               {isLoading ? (
                 <>
                   <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  Registering...
+                  {t('loading')}
                 </>
               ) : (
                 <>
                   <Shield className="w-5 h-5" />
-                  Register for Safety Monitoring
+                  {t('submitRegistration')}
                 </>
               )}
             </button>

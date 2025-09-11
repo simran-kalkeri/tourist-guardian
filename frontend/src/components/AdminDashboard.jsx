@@ -33,8 +33,12 @@ import {
 } from "recharts"
 import TouristMap from "./TouristMap"
 import AnalyticsDashboard from "./AnalyticsDashboard"
+import TouristDetailModal from "./TouristDetailModal"
+import { useLanguage } from "../contexts/LanguageContext"
+import websocketService from "../services/websocketService"
 
 const AdminDashboard = () => {
+  const { t } = useLanguage()
   const [tourists, setTourists] = useState([])
   const [filteredTourists, setFilteredTourists] = useState([])
   const [searchTerm, setSearchTerm] = useState("")
@@ -43,6 +47,10 @@ const AdminDashboard = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [lastUpdate, setLastUpdate] = useState(new Date())
   const [analytics, setAnalytics] = useState(null)
+  const [alerts, setAlerts] = useState([])
+  const [efirs, setEfirs] = useState([])
+  const [selectedTourist, setSelectedTourist] = useState(null)
+  const [safetyScores, setSafetyScores] = useState({})
   const [stats, setStats] = useState({
     total: 0,
     active: 0,
@@ -77,6 +85,26 @@ const AdminDashboard = () => {
       }
     } catch (error) {
       console.error("Failed to fetch analytics:", error)
+    }
+  }, [])
+
+  const fetchAlerts = useCallback(async () => {
+    try {
+      const response = await fetch("http://localhost:5000/api/alerts")
+      const result = await response.json()
+      if (result.success) setAlerts(result.alerts || [])
+    } catch (e) {
+      console.error("Failed to fetch alerts:", e)
+    }
+  }, [])
+
+  const fetchEfirs = useCallback(async () => {
+    try {
+      const response = await fetch("http://localhost:5000/api/efir")
+      const result = await response.json()
+      if (result.success) setEfirs(result.efirs || [])
+    } catch (e) {
+      console.error("Failed to fetch e-firs:", e)
     }
   }, [])
 
@@ -143,15 +171,130 @@ const AdminDashboard = () => {
     }
   }
 
+  const generateEFIR = async (touristId) => {
+    try {
+      const response = await fetch(`http://localhost:5000/api/efir`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ touristId, reason: "Generated from admin dashboard" }),
+      })
+      const result = await response.json()
+      if (result.success) {
+        fetchEfirs()
+        alert(`E-FIR created: ${result.efir.id}`)
+      }
+    } catch (error) {
+      console.error("Failed to create E-FIR:", error)
+    }
+  }
+
+  const fetchSafetyScore = async (touristId) => {
+    try {
+      const response = await fetch("http://localhost:5000/api/ml/predict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          records: [{
+            tourist_id: touristId.toString(),
+            timestamp: new Date().toISOString(),
+            latitude: 28.6139,
+            longitude: 77.2090,
+            speed_m_s: 1.0,
+            time_of_day_bucket: "afternoon",
+            distance_from_itinerary: 0,
+            time_since_last_fix: 60,
+            avg_speed_last_15min: 1.0,
+            area_risk_score: 0.3,
+            prior_incidents_count: 0,
+            days_into_trip: 1,
+            is_in_restricted_zone: false,
+            sos_flag: false,
+            age: 30,
+            sex_encoded: 0,
+            days_trip_duration: 5
+          }]
+        })
+      })
+      const result = await response.json()
+      if (result.success && result.results.length > 0) {
+        setSafetyScores(prev => ({
+          ...prev,
+          [touristId]: result.results[0]
+        }))
+      }
+    } catch (error) {
+      console.error("Failed to fetch safety score:", error)
+    }
+  }
+
+  const getSafetyBandColor = (band) => {
+    switch (band) {
+      case 'high': return 'text-green-600 bg-green-100'
+      case 'medium': return 'text-yellow-600 bg-yellow-100'
+      case 'low': return 'text-red-600 bg-red-100'
+      default: return 'text-gray-600 bg-gray-100'
+    }
+  }
+
   useEffect(() => {
     fetchTourists()
     fetchAnalytics()
+    fetchAlerts()
+    fetchEfirs()
+    
+    // Setup WebSocket connection
+    websocketService.connect()
+    
+    // Listen for real-time updates
+    const handleLocationUpdate = (data) => {
+      if (data.type === 'location_update') {
+        setTourists(prev => prev.map(tourist => 
+          tourist.blockchainId === data.touristId ? data.tourist : tourist
+        ))
+      }
+    }
+    
+    const handleSOSAlert = (data) => {
+      if (data.type === 'sos_alert') {
+        setTourists(prev => prev.map(tourist => 
+          tourist.blockchainId === data.touristId ? data.tourist : tourist
+        ))
+        // Show notification
+        if (data.tourist) {
+          alert(`SOS Alert: ${data.tourist.name} (ID: ${data.touristId})`)
+        }
+      }
+    }
+    
+    const handleAnomalyAlert = (data) => {
+      if (data.type === 'anomaly_alert') {
+        setAlerts(prev => [data.alert, ...prev])
+        // Show notification for high severity alerts
+        if (data.alert.severity === 'high') {
+          alert(`High Priority Alert: ${data.alert.message}`)
+        }
+      }
+    }
+    
+    websocketService.on('location_update', handleLocationUpdate)
+    websocketService.on('sos_alert', handleSOSAlert)
+    websocketService.on('anomaly_alert', handleAnomalyAlert)
+    
     const interval = setInterval(() => {
       fetchTourists()
       fetchAnalytics()
-    }, 5000)
-    return () => clearInterval(interval)
-  }, [fetchTourists, fetchAnalytics])
+      fetchAlerts()
+      fetchEfirs()
+    }, 30000) // Reduced frequency since we have real-time updates
+    
+    return () => {
+      clearInterval(interval)
+      websocketService.off('location_update', handleLocationUpdate)
+      websocketService.off('sos_alert', handleSOSAlert)
+      websocketService.off('anomaly_alert', handleAnomalyAlert)
+      websocketService.disconnect()
+    }
+  }, [fetchTourists, fetchAnalytics, fetchAlerts, fetchEfirs])
 
   const StatCard = ({ title, value, icon: Icon, color, trend }) => (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -213,7 +356,7 @@ const AdminDashboard = () => {
               >
                 <div className="flex items-center gap-2">
                   <Users className="w-4 h-4" />
-                  Overview
+                  {t('overview')}
                 </div>
               </button>
               <button
@@ -226,7 +369,7 @@ const AdminDashboard = () => {
               >
                 <div className="flex items-center gap-2">
                   <MapPin className="w-4 h-4" />
-                  Live Map
+                  {t('liveMap')}
                 </div>
               </button>
               <button
@@ -239,7 +382,7 @@ const AdminDashboard = () => {
               >
                 <div className="flex items-center gap-2">
                   <BarChart3 className="w-4 h-4" />
-                  Analytics & IoT
+                  {t('analytics')}
                 </div>
               </button>
             </nav>
@@ -251,11 +394,11 @@ const AdminDashboard = () => {
         {activeTab === "overview" && (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-              <StatCard title="Total Tourists" value={stats.total} icon={Users} color="bg-emerald-600" trend="+12%" />
-              <StatCard title="Active Tourists" value={stats.active} icon={MapPin} color="bg-blue-600" trend="+5%" />
-              <StatCard title="SOS Alerts" value={stats.sosAlerts} icon={AlertTriangle} color="bg-red-600" />
+              <StatCard title={t('totalTourists')} value={stats.total} icon={Users} color="bg-emerald-600" trend="+12%" />
+              <StatCard title={t('activeTourists')} value={stats.active} icon={MapPin} color="bg-blue-600" trend="+5%" />
+              <StatCard title={t('sosAlerts')} value={stats.sosAlerts} icon={AlertTriangle} color="bg-red-600" />
               <StatCard
-                title="Areas Covered"
+                title={t('areas')}
                 value={Object.keys(stats.areas).length}
                 icon={Shield}
                 color="bg-purple-600"
@@ -309,6 +452,42 @@ const AdminDashboard = () => {
                     <Tooltip />
                   </PieChart>
                 </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent Alerts</h3>
+                <div className="space-y-3 max-h-80 overflow-auto">
+                  {alerts.length === 0 && <p className="text-gray-500">No alerts</p>}
+                  {alerts.slice().reverse().map((a, idx) => (
+                    <div key={idx} className="flex items-start justify-between p-3 rounded-lg border">
+                      <div>
+                        <div className="text-sm font-medium text-gray-900">{a.type.replaceAll('_', ' ')}</div>
+                        <div className="text-xs text-gray-500">Tourist #{a.touristId} • {new Date(a.timestamp).toLocaleString()}</div>
+                        <div className="text-sm text-gray-700 mt-1">{a.message}</div>
+                      </div>
+                      <span className={`text-xs px-2 py-1 rounded ${a.severity === 'warn' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'}`}>{a.severity}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent E-FIRs</h3>
+                <div className="space-y-3 max-h-80 overflow-auto">
+                  {efirs.length === 0 && <p className="text-gray-500">No E-FIRs</p>}
+                  {efirs.slice().reverse().map((e) => (
+                    <div key={e.id} className="p-3 rounded-lg border">
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm font-medium text-gray-900">{e.id}</div>
+                        <div className="text-xs text-gray-500">{new Date(e.generatedAt).toLocaleString()}</div>
+                      </div>
+                      <div className="text-xs text-gray-600 mt-1">Tourist #{e.touristId} • {e.name}</div>
+                      <div className="text-sm text-gray-700 mt-1">{e.reason}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
 
@@ -371,6 +550,9 @@ const AdminDashboard = () => {
                           Status
                         </th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                          Safety Score
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Actions
                         </th>
                       </tr>
@@ -429,13 +611,42 @@ const AdminDashboard = () => {
                               </span>
                             )}
                           </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            {safetyScores[tourist.blockchainId] ? (
+                              <div className="flex items-center gap-2">
+                                <span className={`px-2 py-1 rounded-full text-xs font-medium ${getSafetyBandColor(safetyScores[tourist.blockchainId].safety_band)}`}>
+                                  {safetyScores[tourist.blockchainId].safety_band.toUpperCase()}
+                                </span>
+                                <span className="text-sm text-gray-600">
+                                  {Math.round(safetyScores[tourist.blockchainId].predicted_safety)}
+                                </span>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => fetchSafetyScore(tourist.blockchainId)}
+                                className="text-blue-600 hover:text-blue-800 text-sm"
+                              >
+                                Get Score
+                              </button>
+                            )}
+                          </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                             <div className="flex items-center gap-2">
-                              <button className="text-emerald-600 hover:text-emerald-900 p-1" title="View Details">
+                              <button 
+                                onClick={() => setSelectedTourist(tourist)}
+                                className="text-emerald-600 hover:text-emerald-900 p-1" 
+                                title="View Details"
+                              >
                                 <Eye className="w-4 h-4" />
                               </button>
                               <button className="text-blue-600 hover:text-blue-900 p-1" title="Contact">
                                 <Phone className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => generateEFIR(tourist.blockchainId)}
+                                className="bg-yellow-100 text-yellow-800 hover:bg-yellow-200 px-3 py-1 rounded-md text-xs font-medium transition-colors"
+                              >
+                                Generate E-FIR
                               </button>
                               {tourist.sosActive && (
                                 <button
@@ -464,10 +675,17 @@ const AdminDashboard = () => {
           </>
         )}
 
-        {activeTab === "map" && <TouristMap tourists={tourists} onResetSOS={resetSOS} />}
+        {activeTab === "map" && <TouristMap tourists={tourists} onResetSOS={resetSOS} alerts={alerts} />}
 
         {activeTab === "analytics" && <AnalyticsDashboard />}
       </div>
+
+      {/* Tourist Detail Modal */}
+      <TouristDetailModal
+        tourist={selectedTourist}
+        isOpen={!!selectedTourist}
+        onClose={() => setSelectedTourist(null)}
+      />
     </div>
   )
 }

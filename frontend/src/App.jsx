@@ -1,11 +1,14 @@
 "use client"
 
 import { useState } from "react"
+import { LanguageProvider, useLanguage } from "./contexts/LanguageContext"
 import TouristRegistration from "./components/TouristRegistration"
 import AdminLogin from "./components/AdminLogin"
 import AdminDashboard from "./components/AdminDashboard"
+import LanguageSelector from "./components/LanguageSelector"
 
-function App() {
+function AppContent() {
+  const { t } = useLanguage()
   const [currentView, setCurrentView] = useState("registration") // 'registration', 'admin-login', 'admin-dashboard'
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false)
 
@@ -36,6 +39,7 @@ function App() {
               </div>
 
               <div className="flex items-center gap-4">
+                <LanguageSelector />
                 {!isAdminAuthenticated ? (
                   <>
                     <button
@@ -46,7 +50,7 @@ function App() {
                           : "text-gray-600 hover:text-gray-900"
                       }`}
                     >
-                      Register
+                      {t('register')}
                     </button>
                     <button
                       onClick={() => setCurrentView("admin-login")}
@@ -56,7 +60,7 @@ function App() {
                           : "text-gray-600 hover:text-gray-900"
                       }`}
                     >
-                      Admin Login
+                      {t('adminLogin')}
                     </button>
                   </>
                 ) : (
@@ -64,7 +68,7 @@ function App() {
                     onClick={handleLogout}
                     className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg font-medium hover:bg-gray-200 transition-colors"
                   >
-                    Logout
+                    {t('logout')}
                   </button>
                 )}
               </div>
@@ -80,6 +84,14 @@ function App() {
         {currentView === "admin-dashboard" && isAdminAuthenticated && <AdminDashboard />}
       </main>
     </div>
+  )
+}
+
+function App() {
+  return (
+    <LanguageProvider>
+      <AppContent />
+    </LanguageProvider>
   )
 }
 
