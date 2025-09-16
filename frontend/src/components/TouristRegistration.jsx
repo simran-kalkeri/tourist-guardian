@@ -13,6 +13,7 @@ const TouristRegistration = () => {
     tripStart: "",
     tripEnd: "",
     emergencyContact: "",
+    itinerary: "",
   })
 
   const [errors, setErrors] = useState({})
@@ -83,6 +84,7 @@ const TouristRegistration = () => {
           tripStart: "",
           tripEnd: "",
           emergencyContact: "",
+          itinerary: "",
         })
       } else {
         setErrors({ submit: result.error || t('registrationError') })
@@ -295,6 +297,21 @@ const TouristRegistration = () => {
                         {errors.tripEnd}
                       </p>
                     )}
+                  </div>
+
+                  <div>
+                    <label htmlFor="itinerary" className="block text-sm font-medium text-gray-700 mb-2">
+                      Itinerary (comma separated places)
+                    </label>
+                    <input
+                      type="text"
+                      id="itinerary"
+                      name="itinerary"
+                      value={formData.itinerary}
+                      onChange={handleInputChange}
+                      className="w-full px-4 py-3 border rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition-colors border-gray-300"
+                      placeholder="Delhi, Haridwar, Rishikesh, Nepal"
+                    />
                   </div>
                 </div>
               </div>

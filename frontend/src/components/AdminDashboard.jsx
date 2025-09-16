@@ -34,6 +34,9 @@ import {
 import TouristMap from "./TouristMap"
 import AnalyticsDashboard from "./AnalyticsDashboard"
 import TouristDetailModal from "./TouristDetailModal"
+import AdminWalletPool from "../pages/AdminWalletPool"
+import AdminTxQueue from "../pages/AdminTxQueue"
+import AdminRiskZones from "../pages/AdminRiskZones"
 import { useLanguage } from "../contexts/LanguageContext"
 import websocketService from "../services/websocketService"
 
@@ -43,7 +46,7 @@ const AdminDashboard = () => {
   const [filteredTourists, setFilteredTourists] = useState([])
   const [searchTerm, setSearchTerm] = useState("")
   const [filterStatus, setFilterStatus] = useState("all") // 'all', 'active', 'sos'
-  const [activeTab, setActiveTab] = useState("overview") // 'overview', 'map', 'analytics'
+  const [activeTab, setActiveTab] = useState("overview") // 'overview', 'map', 'analytics', 'wallet-pool', 'tx-queue', 'risk-zones'
   const [isLoading, setIsLoading] = useState(true)
   const [lastUpdate, setLastUpdate] = useState(new Date())
   const [analytics, setAnalytics] = useState(null)
@@ -58,14 +61,32 @@ const AdminDashboard = () => {
     areas: {},
   })
 
+  const apiBase = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000'
+
   const fetchTourists = useCallback(async () => {
     try {
-      const response = await fetch("http://localhost:5000/api/tourists")
+      // Use public endpoint for tourist locations
+      const response = await fetch(`${apiBase}/api/public/tourist-locations`)
       const result = await response.json()
 
       if (result.success) {
-        setTourists(result.tourists)
-        updateStats(result.tourists)
+        // Transform public data to match expected format
+        const transformedTourists = result.tourists.map(tourist => ({
+          ...tourist,
+          blockchainId: tourist.id,
+          latitude: tourist.latitude,
+          longitude: tourist.longitude,
+          displayLatitude: tourist.latitude,
+          displayLongitude: tourist.longitude,
+          isActive: true,
+          name: tourist.name,
+          aadharOrPassport: 'PROTECTED', // PII is protected in public endpoint
+          tripStart: new Date().toISOString(),
+          tripEnd: new Date(Date.now() + 24*60*60*1000).toISOString(),
+          emergencyContact: 'PROTECTED'
+        }))
+        setTourists(transformedTourists)
+        updateStats(transformedTourists)
         setLastUpdate(new Date())
       }
     } catch (error) {
@@ -73,11 +94,11 @@ const AdminDashboard = () => {
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [apiBase])
 
   const fetchAnalytics = useCallback(async () => {
     try {
-      const response = await fetch("http://localhost:5000/api/analytics")
+      const response = await fetch(`${apiBase}/api/analytics`)
       const result = await response.json()
 
       if (result.success) {
@@ -90,7 +111,7 @@ const AdminDashboard = () => {
 
   const fetchAlerts = useCallback(async () => {
     try {
-      const response = await fetch("http://localhost:5000/api/alerts")
+      const response = await fetch(`${apiBase}/api/alerts`)
       const result = await response.json()
       if (result.success) setAlerts(result.alerts || [])
     } catch (e) {
@@ -100,7 +121,7 @@ const AdminDashboard = () => {
 
   const fetchEfirs = useCallback(async () => {
     try {
-      const response = await fetch("http://localhost:5000/api/efir")
+      const response = await fetch(`${apiBase}/api/efir`)
       const result = await response.json()
       if (result.success) setEfirs(result.efirs || [])
     } catch (e) {
@@ -130,6 +151,55 @@ const AdminDashboard = () => {
     return "Historic"
   }
 
+  // Initial data fetch
+  useEffect(() => {
+    fetchTourists()
+    fetchAnalytics()
+    fetchAlerts()
+    fetchEfirs()
+    
+    // Connect WebSocket for real-time updates
+    websocketService.connect()
+    
+    // Listen for real-time updates
+    websocketService.on('location_update', (data) => {
+      setTourists(prevTourists => 
+        prevTourists.map(tourist => 
+          tourist.blockchainId === data.touristId 
+            ? { ...tourist, latitude: data.latitude, longitude: data.longitude, 
+                displayLatitude: data.displayLatitude, displayLongitude: data.displayLongitude,
+                sosActive: data.tourist?.sosActive || tourist.sosActive }
+            : tourist
+        )
+      )
+      setLastUpdate(new Date())
+    })
+    
+    websocketService.on('sos_alert', (data) => {
+      setTourists(prevTourists => 
+        prevTourists.map(tourist => 
+          tourist.blockchainId === data.touristId 
+            ? { ...tourist, sosActive: true }
+            : tourist
+        )
+      )
+      setLastUpdate(new Date())
+    })
+    
+    return () => {
+      websocketService.disconnect()
+    }
+  }, [])
+
+  // Auto-refresh every 5 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchTourists()
+    }, 5000)
+    
+    return () => clearInterval(interval)
+  }, [fetchTourists])
+
   useEffect(() => {
     let filtered = tourists
 
@@ -155,7 +225,7 @@ const AdminDashboard = () => {
 
   const resetSOS = async (touristId) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/tourists/${touristId}/reset-sos`, {
+      const response = await fetch(`${apiBase}/api/tourists/${touristId}/reset-sos`, {
         method: "POST",
       })
 
@@ -173,7 +243,7 @@ const AdminDashboard = () => {
 
   const generateEFIR = async (touristId) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/efir`, {
+      const response = await fetch(`${apiBase}/api/efir`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ touristId, reason: "Generated from admin dashboard" }),
@@ -383,6 +453,45 @@ const AdminDashboard = () => {
                 <div className="flex items-center gap-2">
                   <BarChart3 className="w-4 h-4" />
                   {t('analytics')}
+                </div>
+              </button>
+              <button
+                onClick={() => setActiveTab("wallet-pool")}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === "wallet-pool"
+                    ? "border-emerald-500 text-emerald-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Shield className="w-4 h-4" />
+                  Wallet Pool
+                </div>
+              </button>
+              <button
+                onClick={() => setActiveTab("tx-queue")}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === "tx-queue"
+                    ? "border-emerald-500 text-emerald-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4" />
+                  TX Queue
+                </div>
+              </button>
+              <button
+                onClick={() => setActiveTab("risk-zones")}
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === "risk-zones"
+                    ? "border-emerald-500 text-emerald-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" />
+                  Risk Zones
                 </div>
               </button>
             </nav>
@@ -678,6 +787,12 @@ const AdminDashboard = () => {
         {activeTab === "map" && <TouristMap tourists={tourists} onResetSOS={resetSOS} alerts={alerts} />}
 
         {activeTab === "analytics" && <AnalyticsDashboard />}
+
+        {activeTab === "wallet-pool" && <AdminWalletPool />}
+
+        {activeTab === "tx-queue" && <AdminTxQueue />}
+
+        {activeTab === "risk-zones" && <AdminRiskZones />}
       </div>
 
       {/* Tourist Detail Modal */}

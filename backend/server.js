@@ -10,13 +10,46 @@ require("dotenv").config()
 const EFIR = require("./models/EFIR")
 const PoliceStation = require("./models/PoliceStation")
 
+// Wallet Pool Schema
+const walletPoolSchema = new mongoose.Schema({
+  index: { type: Number, required: true, unique: true },
+  address: { type: String, required: true, unique: true },
+  status: { type: String, enum: ['available', 'assigned'], default: 'available' },
+  assignedToTouristId: { type: Number, default: null },
+  assignedAt: { type: Date, default: null },
+  expiresAt: { type: Date, default: null },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+})
+
+// TX Queue Schema
+const txQueueSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  touristId: { type: Number, required: true },
+  walletIndex: { type: Number, required: true },
+  txType: { type: String, enum: ['registration', 'sos', 'efir', 'tour_end'], required: true },
+  payload: { type: mongoose.Schema.Types.Mixed, required: true },
+  evidenceHash: { type: String, required: true },
+  status: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
+  attempts: { type: Number, default: 0 },
+  lastError: { type: String, default: null },
+  txHash: { type: String, default: null },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+})
+
+const WalletPool = mongoose.model("WalletPool", walletPoolSchema)
+const TXQueue = mongoose.model("TXQueue", txQueueSchema)
+
+const { authenticateJWT, authenticateAPIKey, authorizeRole, generateToken } = require("./middleware/auth")
+
 const app = express()
 const server = http.createServer(app)
 const PORT = process.env.PORT || 5000
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || "http://localhost:8001"
 
 // WebSocket Server
-const wss = new WebSocket.Server({ server })
+const wss = new WebSocket.Server({ server, path: '/ws' })
 const connectedClients = new Set()
 
 // WebSocket connection handling
@@ -55,28 +88,114 @@ app.use(cors())
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
+// Basic health check for connectivity diagnostics
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' })
+})
+
+// Authentication endpoints
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const { username, password } = req.body
+    
+    // Simple demo authentication (replace with proper user management)
+    const validUsers = {
+      'admin': { password: 'admin123', role: 'admin' },
+      'police': { password: 'police123', role: 'police' },
+      'tourism': { password: 'tourism123', role: 'tourismDept' }
+    }
+    
+    const user = validUsers[username]
+    if (!user || user.password !== password) {
+      return res.status(401).json({ 
+        error: 'Invalid credentials',
+        message: 'Username or password is incorrect'
+      })
+    }
+    
+    const token = generateToken({ 
+      id: username, 
+      username, 
+      role: user.role 
+    })
+    
+    res.json({
+      success: true,
+      token,
+      user: {
+        username,
+        role: user.role
+      },
+      expiresIn: '1h'
+    })
+  } catch (error) {
+    res.status(500).json({ error: 'Login failed: ' + error.message })
+  }
+})
+
+app.post('/api/auth/verify', authenticateJWT, (req, res) => {
+  res.json({
+    success: true,
+    user: req.user
+  })
+})
+
 // In-memory time-series storage and alerts (lightweight; replace with Redis/DB later)
 const recentTicks = new Map() // key: touristId (number), value: [{timestamp, latitude, longitude}]
 const MAX_TICKS_PER_TOURIST = 50
 const alerts = [] // {touristId, type, severity, message, timestamp}
 
-// MongoDB Connection
-const MONGODB_URI =
+// MongoDB Atlas Connection
+const MONGODB_URI = process.env.MONGODB_URI ||
   "mongodb+srv://siteadmin:officer123@cluster0.l6busjy.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 
+// Set mongoose options for better Atlas connectivity
+// Enable buffering to queue commands until connection is ready
+mongoose.set('bufferCommands', true);
+mongoose.set('strictQuery', false);
+
+let mongoConnected = false;
+
 mongoose
-  .connect(MONGODB_URI)
-  .then(() => console.log("Connected to MongoDB"))
-  .catch((err) => console.error("MongoDB connection error:", err))
+  .connect(MONGODB_URI, {
+    serverSelectionTimeoutMS: 30000, // Wait up to 30s for server selection
+    socketTimeoutMS: 0, // Disable socket timeout
+    connectTimeoutMS: 30000, // Give up initial connection after 30s
+    maxPoolSize: 10, // Maintain up to 10 socket connections
+    minPoolSize: 2, // Maintain a minimum of 2 socket connections
+    maxIdleTimeMS: 30000, // Close connections after 30s of inactivity
+    retryWrites: true,
+    retryReads: true,
+    heartbeatFrequencyMS: 10000, // Send heartbeat every 10s
+  })
+  .then(() => {
+    console.log("✅ Connected to MongoDB Atlas successfully")
+    mongoConnected = true
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB Atlas connection failed:", err.message)
+    console.log("Please check your internet connection and MongoDB Atlas credentials")
+    // Do not exit immediately; allow app to run in limited mode
+    mongoConnected = false
+  })
 
 // Blockchain setup
 const BlockchainService = require("../blockchain/utils")
 const IoTSimulationService = require("./services/iotSimulation")
+const SimulationEngine = require("./services/simulationEngine")
 const WalletQueueService = require("./services/walletQueue")
+const WalletPoolService = require("./services/walletPool")
+const TXQueueService = require("./services/txQueue")
+const { auditRegistration, auditSOS, auditWalletRelease, auditPIIAccess, getAuditLogs } = require("./middleware/audit")
+const { geofenceService, GeofenceZone } = require("./services/geofence")
+const { anomalyDetectorService, AnomalyDetection } = require("./services/anomalyDetector")
 
 let blockchainService
 let iotSimulation
 let walletQueue
+let simulationEngine
+let walletPool
+let txQueue
 
 // Initialize services
 async function initServices() {
@@ -104,14 +223,50 @@ async function initServices() {
     walletQueue = new WalletQueueService()
     console.log("Wallet queue service initialized")
 
+    // Initialize wallet pool service
+    walletPool = new WalletPoolService()
+    await walletPool.initialize()
+    console.log("Wallet pool service initialized")
+
+    // Initialize TX queue service
+    txQueue = new TXQueueService()
+    await txQueue.initialize(blockchainService)
+    txQueue.startWorker()
+    console.log("TX queue service initialized")
+
+    // Initialize geo-fence service
+    await geofenceService.initialize()
+    console.log("Geo-fence service initialized")
+
+    // Initialize anomaly detector
+    await anomalyDetectorService.initialize()
+    console.log("Anomaly detector service initialized")
+
     // Initialize IoT simulation service
     iotSimulation = new IoTSimulationService()
     await iotSimulation.initialize(Tourist, blockchainService)
 
-    // Start IoT simulations for existing tourists
+    // Start IoT simulations for existing tourists only after MongoDB is ready
     setTimeout(async () => {
-      await iotSimulation.startAllSimulations()
-    }, 2000) // Wait 2 seconds for everything to be ready
+      if (isMongoConnected()) {
+        try {
+          await iotSimulation.startAllSimulations()
+        } catch (error) {
+          console.log('IoT simulation startup failed:', error.message)
+        }
+      } else {
+        console.log('⚠️  Skipping IoT simulation startup (MongoDB not available)')
+      }
+    }, 5000) // Wait 5 seconds for MongoDB connection
+
+    // Start itinerary-driven simulation engine
+    simulationEngine = new SimulationEngine({
+      TouristModel: Tourist,
+      broadcaster: broadcastToClients,
+      tickSeconds: Number(process.env.SIM_TICK_INTERVAL_SECONDS || 5),
+      defaultSpeedMps: Number(process.env.SIM_DEFAULT_SPEED_MPS || 12),
+    })
+    simulationEngine.start()
   } catch (error) {
     console.error("Service initialization error:", error)
   }
@@ -126,18 +281,72 @@ const touristSchema = new mongoose.Schema({
   tripStart: { type: Date, required: true },
   tripEnd: { type: Date, required: true },
   emergencyContact: { type: String, required: true },
+  // Itinerary of planned waypoints for simulation-driven tours
+  itinerary: [
+    {
+      name: { type: String },
+      lat: { type: Number, required: false },
+      lng: { type: Number, required: false },
+      expectedArrival: { type: Date, required: false },
+      expectedDeparture: { type: Date, required: false },
+    },
+  ],
+  simulationMode: { type: Boolean, default: false },
+  simulationState: {
+    currentSegmentIndex: { type: Number, default: 0 },
+    lastSimTickAt: { type: Date, default: null },
+    simulatedSpeedMps: { type: Number, default: 12 },
+    simulatedPathId: { type: String, default: null },
+  },
   latitude: { type: Number, default: 0 },
   longitude: { type: Number, default: 0 },
+  rawLatitude: { type: Number, default: 0 },
+  rawLongitude: { type: Number, default: 0 },
+  displayLatitude: { type: Number, default: 26.2006 },
+  displayLongitude: { type: Number, default: 92.9376 },
   sosActive: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
+  // Source of last known location: 'simulation' | 'device'
+  locationSource: { type: String, enum: ['simulation', 'device'], default: 'simulation' },
+  deviceTracked: { type: Boolean, default: false },
+  lastDeviceFixAt: { type: Date, default: null },
+  assignedWallet: {
+    address: { type: String, default: null },
+    index: { type: Number, default: null },
+    assignedAt: { type: Date, default: null },
+    expiresAt: { type: Date, default: null },
+  },
+  blockchainStatus: {
+    registrationTx: {
+      status: { type: String, default: 'pending' },
+      txHash: { type: String, default: null },
+      triedAt: { type: [Date], default: [] },
+    },
+    lastEventTx: {
+      status: { type: String, default: null },
+      txHash: { type: String, default: null },
+      triedAt: { type: [Date], default: [] },
+    },
+  },
+  flags: { simulated: { type: Boolean, default: false } },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 })
 
 const Tourist = mongoose.model("Tourist", touristSchema)
 
+// MongoDB availability check function
+function isMongoConnected() {
+  return mongoConnected && mongoose.connection.readyState === 1;
+}
+
 // Ensure MongoDB indexes are correct (drop obsolete tokenId index if present)
 async function ensureTouristIndexes() {
+  if (!isMongoConnected()) {
+    console.log("⚠️  MongoDB not available - skipping index maintenance")
+    return
+  }
+  
   try {
     const indexes = await Tourist.collection.indexes()
     const obsoleteNames = ["tokenId_1", "digitalID_1"]
@@ -163,9 +372,9 @@ async function ensureTouristIndexes() {
 // API Routes
 
 // 1. Register Tourist
-app.post("/api/tourists/register", async (req, res) => {
+app.post("/api/tourists/register", auditRegistration, async (req, res) => {
   try {
-    const { name, aadharOrPassport, tripStart, tripEnd, emergencyContact } = req.body
+    const { name, aadharOrPassport, tripStart, tripEnd, emergencyContact, itinerary } = req.body
 
     if (!name || !aadharOrPassport || !tripStart || !tripEnd || !emergencyContact) {
       return res.status(400).json({ error: "All fields are required" })
@@ -173,9 +382,10 @@ app.post("/api/tourists/register", async (req, res) => {
 
     // Check for expired assignments and release wallets
     walletQueue.checkExpiredAssignments()
+    walletPool.checkExpiredAssignments()
 
-    // Get next available wallet
-    const assignedWallet = walletQueue.assignWallet(0, tripEnd) // We'll update the touristId after creation
+    // Get next available wallet from pool
+    const assignedWallet = walletPool.assignWallet(0, tripEnd) // We'll update the touristId after creation
 
     const tripStartTimestamp = Math.floor(new Date(tripStart).getTime() / 1000)
     const tripEndTimestamp = Math.floor(new Date(tripEnd).getTime() / 1000)
@@ -230,6 +440,18 @@ app.post("/api/tourists/register", async (req, res) => {
       }
     }
 
+    // Resolve itinerary coordinates (if names only)
+    let resolvedItinerary = []
+    if (Array.isArray(itinerary) && itinerary.length > 0) {
+      const { geocode } = require('./utils/geocode')
+      resolvedItinerary = itinerary.map((pt) => {
+        if (pt.lat !== undefined && pt.lng !== undefined) return pt
+        const hit = geocode(pt.name)
+        if (!hit) return pt
+        return { ...pt, lat: hit.lat, lng: hit.lng }
+      })
+    }
+
     // Save to MongoDB
     const tourist = new Tourist({
       blockchainId: blockchainResult.touristId || Math.floor(Math.random() * 1000000), // Fallback ID if blockchain fails
@@ -239,6 +461,21 @@ app.post("/api/tourists/register", async (req, res) => {
       tripStart: new Date(tripStart),
       tripEnd: new Date(tripEnd),
       emergencyContact,
+      itinerary: resolvedItinerary,
+      simulationMode: true,
+      // Initialize display coords to actual location
+      displayLatitude: (resolvedItinerary[0]?.lat ?? 26.2006),
+      displayLongitude: (resolvedItinerary[0]?.lng ?? 92.9376),
+      // Set actual coordinates for immediate display
+      latitude: (resolvedItinerary[0]?.lat ?? 26.2006),
+      longitude: (resolvedItinerary[0]?.lng ?? 92.9376),
+      flags: { simulated: true },
+      assignedWallet: {
+        address: assignedWallet.address,
+        index: assignedWallet.index,
+        assignedAt: assignedWallet.assignedAt,
+        expiresAt: assignedWallet.expiresAt
+      }
     })
 
     await tourist.save()
@@ -250,6 +487,38 @@ app.post("/api/tourists/register", async (req, res) => {
         assignment.touristId = tourist.blockchainId
       }
     }
+
+    // Enqueue registration TX job with PII redaction
+    const registrationPayload = {
+      name,
+      aadharOrPassport: '[REDACTED]', // PII redacted for blockchain
+      tripStart,
+      tripEnd,
+      emergencyContact: '[REDACTED]', // PII redacted for blockchain
+      itinerary: resolvedItinerary,
+      // Store hashes instead of raw PII
+      aadharHash: require('crypto').createHash('sha256').update(aadharOrPassport).digest('hex'),
+      contactHash: require('crypto').createHash('sha256').update(emergencyContact).digest('hex')
+    }
+    const txJobId = txQueue.enqueueJob(
+      tourist.blockchainId,
+      assignedWallet.index,
+      'registration',
+      registrationPayload
+    )
+
+    // Save wallet pool state to DB
+    await WalletPool.findOneAndUpdate(
+      { index: assignedWallet.index },
+      {
+        address: assignedWallet.address,
+        status: 'assigned',
+        assignedToTouristId: tourist.blockchainId,
+        assignedAt: assignedWallet.assignedAt,
+        expiresAt: assignedWallet.expiresAt
+      },
+      { upsert: true }
+    )
 
     if (iotSimulation) {
       await iotSimulation.addTouristToSimulation(tourist)
@@ -273,7 +542,7 @@ app.post("/api/tourists/register", async (req, res) => {
 })
 
 // 2. Get All Tourists (Admin only)
-app.get("/api/tourists", async (req, res) => {
+app.get("/api/tourists", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), auditPIIAccess, async (req, res) => {
   try {
     const tourists = await Tourist.find({ isActive: true }).sort({ createdAt: -1 })
     res.json({ success: true, tourists })
@@ -283,22 +552,83 @@ app.get("/api/tourists", async (req, res) => {
   }
 })
 
+// Public endpoint for frontend to get tourist locations (without PII)
+app.get("/api/public/tourist-locations", async (req, res) => {
+  try {
+    const tourists = await Tourist.find({ isActive: true }, {
+      blockchainId: 1,
+      name: 1,
+      displayLatitude: 1,
+      displayLongitude: 1,
+      latitude: 1,
+      longitude: 1,
+      sosActive: 1,
+      locationSource: 1,
+      updatedAt: 1,
+      simulationMode: 1
+    }).sort({ updatedAt: -1 })
+    
+    res.json({ 
+      success: true, 
+      tourists: tourists.map(t => ({
+        id: t.blockchainId,
+        name: t.name,
+        latitude: t.displayLatitude || t.latitude,
+        longitude: t.displayLongitude || t.longitude,
+        sosActive: t.sosActive,
+        locationSource: t.locationSource,
+        lastUpdate: t.updatedAt,
+        simulated: t.simulationMode
+      }))
+    })
+  } catch (error) {
+    console.error("Fetch public tourist locations error:", error)
+    res.status(500).json({ error: "Failed to fetch tourist locations" })
+  }
+})
+
 // 3. Update Tourist Location
+// NE bounds (approximate)
+const NE_BOUNDS = { minLat: 21.5, maxLat: 29.9, minLng: 88.0, maxLng: 97.5 }
+function clampToNE(lat, lng) {
+  const clampedLat = Math.min(Math.max(lat, NE_BOUNDS.minLat), NE_BOUNDS.maxLat)
+  const clampedLng = Math.min(Math.max(lng, NE_BOUNDS.minLng), NE_BOUNDS.maxLng)
+  return { latitude: clampedLat, longitude: clampedLng }
+}
+
 app.post("/api/tourists/:id/location", async (req, res) => {
   try {
     const { id } = req.params
     const { latitude, longitude } = req.body
 
-    if (!latitude || !longitude) {
+    if (latitude === undefined || longitude === undefined) {
       return res.status(400).json({ error: "Latitude and longitude are required" })
     }
 
-    // Update on blockchain using service
-    const blockchainResult = await blockchainService.updateLocation(Number(id), latitude, longitude)
-
-    if (!blockchainResult.success) {
-      return res.status(500).json({ error: "Blockchain location update failed: " + blockchainResult.error })
+    // Check if tourist is in simulation mode and not device tracked - ignore device updates
+    const existing = await Tourist.findOne({ blockchainId: Number(id), isActive: true })
+    if (existing && existing.simulationMode && !existing.deviceTracked) {
+      return res.json({ 
+        success: true, 
+        ignored: true, 
+        reason: 'simulation_mode',
+        message: 'Device location ignored - tourist is in simulation mode'
+      })
     }
+
+    // Update on blockchain using service
+    let blockchainResult = { success: false, transactionHash: null }
+    if (blockchainService && blockchainService.contract) {
+      try {
+        blockchainResult = await blockchainService.updateLocation(Number(id), latitude, longitude)
+      } catch (e) {
+        console.log('Blockchain location update error:', e)
+      }
+    }
+
+    // Enforce NE display policy
+    const inNE = latitude >= NE_BOUNDS.minLat && latitude <= NE_BOUNDS.maxLat && longitude >= NE_BOUNDS.minLng && longitude <= NE_BOUNDS.maxLng
+    const display = inNE ? { latitude, longitude } : clampToNE(latitude, longitude)
 
     // Update in MongoDB
     const tourist = await Tourist.findOneAndUpdate(
@@ -307,6 +637,11 @@ app.post("/api/tourists/:id/location", async (req, res) => {
         latitude: latitude,
         longitude: longitude,
         updatedAt: new Date(),
+        displayLatitude: display.latitude,
+        displayLongitude: display.longitude,
+        locationSource: 'device',
+        deviceTracked: true,
+        lastDeviceFixAt: new Date(),
       },
       { new: true },
     )
@@ -326,6 +661,50 @@ app.post("/api/tourists/:id/location", async (req, res) => {
       recentTicks.set(tid, arr)
     } catch {}
 
+    // Check geo-fencing
+    const geofenceResult = geofenceService.checkPointInZones(latitude, longitude)
+    if (geofenceResult.inZone) {
+      console.log(`🚨 Tourist ${id} entered risk zone:`, geofenceResult.zones)
+      
+      // Send geo-fence alert
+      for (const zone of geofenceResult.zones) {
+        if (zone.autoAlert) {
+          // Enqueue geo-fence alert TX
+          const alertPayload = {
+            touristId: Number(id),
+            zoneName: zone.name,
+            zoneType: zone.zoneType,
+            severity: zone.severity,
+            alertMessage: zone.alertMessage,
+            location: { latitude, longitude },
+            timestamp: new Date().toISOString()
+          }
+          
+          txQueue.enqueueJob(
+            Number(id),
+            tourist.assignedWallet?.index || 0,
+            'geofence_alert',
+            alertPayload
+          )
+        }
+      }
+    }
+
+    // Run anomaly detection
+    try {
+      const anomalies = await anomalyDetectorService.detectAnomalies(
+        Number(id),
+        { latitude, longitude, accuracy: 10, timestamp: new Date() },
+        tourist.itinerary || []
+      )
+      
+      if (anomalies.length > 0) {
+        console.log(`🤖 Detected ${anomalies.length} anomalies for tourist ${id}`)
+      }
+    } catch (error) {
+      console.error('Anomaly detection error:', error)
+    }
+
     // Broadcast location update to all connected clients
     broadcastToClients({
       type: 'location_update',
@@ -333,6 +712,9 @@ app.post("/api/tourists/:id/location", async (req, res) => {
       tourist: tourist,
       latitude,
       longitude,
+      displayLatitude: tourist.displayLatitude,
+      displayLongitude: tourist.displayLongitude,
+      geofenceAlerts: geofenceResult.zones,
       timestamp: new Date().toISOString()
     })
 
@@ -348,15 +730,18 @@ app.post("/api/tourists/:id/location", async (req, res) => {
 })
 
 // 4. Trigger SOS
-app.post("/api/tourists/:id/sos", async (req, res) => {
+app.post("/api/tourists/:id/sos", auditSOS, async (req, res) => {
   try {
     const { id } = req.params
 
-    // Trigger SOS on blockchain using service
-    const blockchainResult = await blockchainService.triggerSOS(Number(id))
-
-    if (!blockchainResult.success) {
-      return res.status(500).json({ error: "Blockchain SOS trigger failed: " + blockchainResult.error })
+    // Trigger SOS on blockchain using service (best effort)
+    let blockchainResult = { success: false, transactionHash: null }
+    if (blockchainService && blockchainService.contract) {
+      try {
+        blockchainResult = await blockchainService.triggerSOS(Number(id))
+      } catch (e) {
+        console.log('Blockchain SOS trigger error:', e)
+      }
     }
 
     // Update in MongoDB
@@ -373,11 +758,34 @@ app.post("/api/tourists/:id/sos", async (req, res) => {
       return res.status(404).json({ error: "Tourist not found" })
     }
 
-    // Broadcast SOS alert to all connected clients
+    // Enqueue SOS TX job
+    const sosPayload = {
+      touristId: Number(id),
+      location: {
+        latitude: tourist.displayLatitude,
+        longitude: tourist.displayLongitude
+      },
+      timestamp: new Date().toISOString(),
+      simulated: tourist.simulationMode
+    }
+    
+    if (tourist.assignedWallet && tourist.assignedWallet.index !== null) {
+      const txJobId = txQueue.enqueueJob(
+        Number(id),
+        tourist.assignedWallet.index,
+        'sos',
+        sosPayload
+      )
+      console.log(`🚨 Enqueued SOS TX job ${txJobId} for tourist ${id}`)
+    }
+
+    // Broadcast SOS alert once, include display coords
     broadcastToClients({
       type: 'sos_alert',
       touristId: Number(id),
-      tourist: tourist,
+      tourist,
+      displayLatitude: tourist.displayLatitude,
+      displayLongitude: tourist.displayLongitude,
       timestamp: new Date().toISOString(),
       severity: 'high'
     })
@@ -451,6 +859,68 @@ app.get("/api/wallet-queue/status", (req, res) => {
   } catch (error) {
     console.error("Wallet queue status error:", error)
     res.status(500).json({ error: "Failed to get wallet queue status" })
+  }
+})
+
+// Get wallet pool status
+app.get("/api/wallet-pool/status", (req, res) => {
+  try {
+    const status = walletPool ? walletPool.getPoolStats() : { total: 0, available: 0, assigned: 0, assignedWallets: [] }
+    res.json({ success: true, status })
+  } catch (error) {
+    console.error("Wallet pool status error:", error)
+    res.status(500).json({ error: "Failed to get wallet pool status" })
+  }
+})
+
+// Get TX queue status
+app.get("/api/tx-queue/status", (req, res) => {
+  try {
+    const status = txQueue ? txQueue.getQueueStatus() : { total: 0, pending: 0, sent: 0, failed: 0, jobs: [] }
+    res.json({ success: true, status })
+  } catch (error) {
+    console.error("TX queue status error:", error)
+    res.status(500).json({ error: "Failed to get TX queue status" })
+  }
+})
+
+// Release wallet (admin only)
+app.post("/api/admin/wallet-pool/:index/release", authenticateJWT, authorizeRole(['admin']), auditWalletRelease, async (req, res) => {
+  try {
+    const { index } = req.params
+    const walletIndex = parseInt(index)
+    
+    if (isNaN(walletIndex)) {
+      return res.status(400).json({ error: "Invalid wallet index" })
+    }
+
+    // Check if wallet can be released (no pending TXs)
+    if (txQueue && !txQueue.canReleaseWallet(walletIndex)) {
+      return res.status(400).json({ 
+        error: "Cannot release wallet - has pending transactions",
+        pendingJobs: txQueue.getJobsForWallet(walletIndex).filter(j => j.status === 'pending').length
+      })
+    }
+
+    // Release wallet
+    const result = walletPool.releaseWallet(walletIndex)
+    
+    // Update DB
+    await WalletPool.findOneAndUpdate(
+      { index: walletIndex },
+      {
+        status: 'available',
+        assignedToTouristId: null,
+        assignedAt: null,
+        expiresAt: null,
+        updatedAt: new Date()
+      }
+    )
+
+    res.json({ success: true, message: "Wallet released successfully", result })
+  } catch (error) {
+    console.error("Wallet release error:", error)
+    res.status(500).json({ error: "Failed to release wallet: " + error.message })
   }
 })
 
@@ -561,18 +1031,49 @@ app.get('/api/police-stations', async (req, res) => {
   res.json({ success: true, stations })
 })
 
+// Restricted/high-risk zones (demo; replace with DB/GIS feed)
+app.get('/api/zones', (req, res) => {
+  const zones = [
+    {
+      name: 'High Security Area',
+      riskLevel: 'high',
+      coordinates: [[28.6139, 77.209],[28.6149,77.209],[28.6149,77.219],[28.6139,77.219],[28.6139,77.209]]
+    },
+    {
+      name: 'Restricted Tourist Zone',
+      riskLevel: 'medium',
+      coordinates: [[28.6039,77.199],[28.6049,77.199],[28.6049,77.209],[28.6039,77.209],[28.6039,77.199]]
+    },
+    {
+      name: 'Night Curfew Zone',
+      riskLevel: 'low',
+      coordinates: [[25.5788,91.8933],[25.5798,91.8933],[25.5798,91.9033],[25.5788,91.9033],[25.5788,91.8933]]
+    }
+  ]
+  res.json({ success: true, zones })
+})
+
 // seed minimal NE police stations if empty
 async function seedPoliceStationsIfEmpty() {
-  const count = await PoliceStation.countDocuments()
-  if (count > 0) return
-  const demo = [
-    { name: 'Panbazar PS', state: 'Assam', district: 'Kamrup Metro', latitude: 26.1838, longitude: 91.7450, phone: '0361-000000' },
-    { name: 'Dispur PS', state: 'Assam', district: 'Kamrup Metro', latitude: 26.1433, longitude: 91.7898, phone: '0361-000000' },
-    { name: 'Shillong Sadar PS', state: 'Meghalaya', district: 'East Khasi Hills', latitude: 25.5788, longitude: 91.8933, phone: '0364-000000' },
-    { name: 'Itanagar PS', state: 'Arunachal Pradesh', district: 'Papum Pare', latitude: 27.0844, longitude: 93.6053, phone: '0360-000000' },
-  ]
-  await PoliceStation.insertMany(demo)
-  console.log('Seeded demo police stations')
+  if (!isMongoConnected()) {
+    console.log("⚠️  MongoDB not available - skipping police station seeding")
+    return
+  }
+  
+  try {
+    const count = await PoliceStation.countDocuments()
+    if (count > 0) return
+    const demo = [
+      { name: 'Panbazar PS', state: 'Assam', district: 'Kamrup Metro', latitude: 26.1838, longitude: 91.7450, phone: '0361-000000' },
+      { name: 'Dispur PS', state: 'Assam', district: 'Kamrup Metro', latitude: 26.1433, longitude: 91.7898, phone: '0361-000000' },
+      { name: 'Shillong Sadar PS', state: 'Meghalaya', district: 'East Khasi Hills', latitude: 25.5788, longitude: 91.8933, phone: '0364-000000' },
+      { name: 'Itanagar PS', state: 'Arunachal Pradesh', district: 'Papum Pare', latitude: 27.0844, longitude: 93.6053, phone: '0360-000000' },
+    ]
+    await PoliceStation.insertMany(demo)
+    console.log('Seeded demo police stations')
+  } catch (error) {
+    console.log('Police station seeding failed:', error.message)
+  }
 }
 
 // Start/Stop simulation
@@ -597,8 +1098,120 @@ app.post("/api/simulation/toggle", async (req, res) => {
   }
 })
 
+// Get audit logs (admin only)
+app.get("/api/admin/audit-logs", authenticateJWT, authorizeRole(['admin']), getAuditLogs)
+
+// Geo-fence endpoints
+app.get("/api/geofence/zones", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
+  try {
+    const zones = await geofenceService.getAllZones()
+    res.json({ success: true, zones })
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch zones: ' + error.message })
+  }
+})
+
+app.get("/api/geofence/stats", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
+  try {
+    const stats = await geofenceService.getZoneStats()
+    res.json({ success: true, stats })
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch zone stats: ' + error.message })
+  }
+})
+
+app.post("/api/geofence/zones", authenticateJWT, authorizeRole(['admin']), async (req, res) => {
+  try {
+    const result = await geofenceService.createZone(req.body)
+    if (result.success) {
+      res.json({ success: true, zone: result.zone })
+    } else {
+      res.status(400).json({ error: result.error })
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create zone: ' + error.message })
+  }
+})
+
+app.patch("/api/geofence/zones/:id", authenticateJWT, authorizeRole(['admin']), async (req, res) => {
+  try {
+    const result = await geofenceService.updateZone(req.params.id, req.body)
+    if (result.success) {
+      res.json({ success: true, zone: result.zone })
+    } else {
+      res.status(400).json({ error: result.error })
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update zone: ' + error.message })
+  }
+})
+
+app.delete("/api/geofence/zones/:id", authenticateJWT, authorizeRole(['admin']), async (req, res) => {
+  try {
+    const result = await geofenceService.deleteZone(req.params.id)
+    if (result.success) {
+      res.json({ success: true })
+    } else {
+      res.status(400).json({ error: result.error })
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete zone: ' + error.message })
+  }
+})
+
+// Anomaly detection endpoints
+app.get("/api/anomalies", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
+  try {
+    const filters = {
+      touristId: req.query.touristId ? parseInt(req.query.touristId) : undefined,
+      anomalyType: req.query.anomalyType,
+      severity: req.query.severity,
+      status: req.query.status,
+      limit: req.query.limit ? parseInt(req.query.limit) : 50
+    }
+    
+    const anomalies = await anomalyDetectorService.getAllAnomalies(filters)
+    res.json({ success: true, anomalies })
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch anomalies: ' + error.message })
+  }
+})
+
+app.get("/api/anomalies/stats", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
+  try {
+    const stats = await anomalyDetectorService.getAnomalyStats()
+    res.json({ success: true, stats })
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch anomaly stats: ' + error.message })
+  }
+})
+
+app.get("/api/anomalies/tourist/:id", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
+  try {
+    const touristId = parseInt(req.params.id)
+    const anomalies = await anomalyDetectorService.getTouristAnomalies(touristId)
+    res.json({ success: true, anomalies })
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch tourist anomalies: ' + error.message })
+  }
+})
+
+app.patch("/api/anomalies/:id/resolve", authenticateJWT, authorizeRole(['admin', 'police']), async (req, res) => {
+  try {
+    const { status, resolvedBy } = req.body
+    const result = await anomalyDetectorService.resolveAnomaly(req.params.id, resolvedBy, status)
+    if (result.success) {
+      res.json({ success: true, anomaly: result.anomaly })
+    } else {
+      res.status(400).json({ error: result.error })
+    }
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to resolve anomaly: ' + error.message })
+  }
+})
+
 // Get analytics data
-app.get("/api/analytics", async (req, res) => {
+app.get("/api/analytics", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
   try {
     const tourists = await Tourist.find({ isActive: true })
 
@@ -818,14 +1431,22 @@ process.on("SIGINT", () => {
 
 // Initialize and start server
 async function startServer() {
-  // Make sure indexes are correct before starting
-  await ensureTouristIndexes()
+  // Initialize services first (doesn't require MongoDB)
   await initServices()
-  await seedPoliceStationsIfEmpty()
+  
+  // Only run MongoDB operations if connection is available
+  if (isMongoConnected()) {
+    // Make sure indexes are correct before starting
+    await ensureTouristIndexes()
+    await seedPoliceStationsIfEmpty()
+  } else {
+    console.log("⚠️  Skipping MongoDB-dependent initialization (connection not available)")
+  }
 
-  server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`)
-    console.log(`WebSocket server running on ws://localhost:${PORT}/ws`)
+  // Bind on all interfaces to allow LAN access from phones on the same network
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://0.0.0.0:${PORT}`)
+    console.log(`WebSocket server running on ws://0.0.0.0:${PORT}/ws`)
   })
 }
 

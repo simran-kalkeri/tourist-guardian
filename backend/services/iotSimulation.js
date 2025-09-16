@@ -85,11 +85,15 @@ class IoTSimulationService {
           return
         }
 
-        // Generate new location (gradual movement)
-        currentLocation = this.generateMovement(currentLocation.latitude, currentLocation.longitude)
-
-        // Update location
-        await this.updateTouristLocation(tourist.blockchainId, currentLocation.latitude, currentLocation.longitude)
+        // If device has sent a fix in the last 60s, don't override with simulation
+        if (updatedTourist.deviceTracked) {
+          currentLocation = { latitude: updatedTourist.latitude, longitude: updatedTourist.longitude }
+        } else {
+          // Generate new location (gradual movement)
+          currentLocation = this.generateMovement(currentLocation.latitude, currentLocation.longitude)
+          // Update location
+          await this.updateTouristLocation(tourist.blockchainId, currentLocation.latitude, currentLocation.longitude)
+        }
 
         // Random SOS trigger (1% chance every 5 seconds = very rare)
         if (Math.random() < 0.01 && !updatedTourist.sosActive) {
@@ -127,30 +131,21 @@ class IoTSimulationService {
   // Update tourist location in both database and blockchain
   async updateTouristLocation(touristId, latitude, longitude) {
     try {
-      // Update in MongoDB
+      // Update in MongoDB with display coordinates
       await this.Tourist.findOneAndUpdate(
         { blockchainId: touristId, isActive: true },
         {
           latitude: latitude,
           longitude: longitude,
+          displayLatitude: latitude,
+          displayLongitude: longitude,
+          locationSource: 'simulation',
           updatedAt: new Date(),
         },
       )
 
-      // Update on blockchain only if tourist exists
-      if (this.blockchainService) {
-        try {
-          // First check if tourist exists on blockchain
-          const touristInfo = await this.blockchainService.getTourist(touristId)
-          if (touristInfo.success && touristInfo.tourist.isRegistered) {
-            await this.blockchainService.updateLocation(touristId, latitude, longitude)
-          } else {
-            console.log(`Tourist ${touristId} not registered on blockchain, skipping blockchain update`)
-          }
-        } catch (blockchainError) {
-          console.log(`Blockchain update failed for tourist ${touristId}, continuing with database update only`)
-        }
-      }
+      // Skip blockchain updates for now to avoid constant errors
+      // Blockchain integration can be enabled when contract is properly deployed
 
       console.log(`Updated location for tourist ${touristId}: ${latitude}, ${longitude}`)
     } catch (error) {
@@ -170,19 +165,8 @@ class IoTSimulationService {
         },
       )
 
-      // Update on blockchain only if tourist exists
-      if (this.blockchainService) {
-        try {
-          const touristInfo = await this.blockchainService.getTourist(touristId)
-          if (touristInfo.success && touristInfo.tourist.isRegistered) {
-            await this.blockchainService.triggerSOS(touristId)
-          } else {
-            console.log(`Tourist ${touristId} not registered on blockchain, skipping blockchain SOS update`)
-          }
-        } catch (blockchainError) {
-          console.log(`Blockchain SOS trigger failed for tourist ${touristId}, continuing with database update only`)
-        }
-      }
+      // Skip blockchain SOS updates to avoid errors
+      // Blockchain integration can be enabled when contract is properly deployed
 
       console.log(`Triggered SOS for tourist ${touristId}`)
     } catch (error) {
@@ -202,19 +186,8 @@ class IoTSimulationService {
         },
       )
 
-      // Update on blockchain only if tourist exists
-      if (this.blockchainService) {
-        try {
-          const touristInfo = await this.blockchainService.getTourist(touristId)
-          if (touristInfo.success && touristInfo.tourist.isRegistered) {
-            await this.blockchainService.resetSOS(touristId)
-          } else {
-            console.log(`Tourist ${touristId} not registered on blockchain, skipping blockchain SOS reset`)
-          }
-        } catch (blockchainError) {
-          console.log(`Blockchain SOS reset failed for tourist ${touristId}, continuing with database update only`)
-        }
-      }
+      // Skip blockchain SOS reset to avoid errors
+      // Blockchain integration can be enabled when contract is properly deployed
 
       console.log(`Reset SOS for tourist ${touristId}`)
     } catch (error) {
@@ -230,6 +203,13 @@ class IoTSimulationService {
     }
 
     try {
+      // Check if mongoose is connected
+      const mongoose = require('mongoose')
+      if (mongoose.connection.readyState !== 1) {
+        console.log('⚠️  MongoDB not ready, cannot start simulations')
+        return
+      }
+
       const activeTourists = await this.Tourist.find({ isActive: true })
       console.log(`Starting IoT simulations for ${activeTourists.length} active tourists`)
 

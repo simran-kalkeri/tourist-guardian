@@ -9,8 +9,20 @@ class WebSocketService {
 
   connect() {
     try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${protocol}//${window.location.hostname}:5000/ws`
+      const apiBase = process.env.REACT_APP_API_BASE_URL
+      let wsUrl
+      if (apiBase) {
+        try {
+          const u = new URL(apiBase)
+          wsUrl = `${u.protocol === 'https:' ? 'wss:' : 'ws:'}//${u.host}/ws`
+        } catch {
+          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+          wsUrl = `${protocol}//${window.location.hostname}:5000/ws`
+        }
+      } else {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+        wsUrl = `${protocol}//${window.location.hostname}:5000/ws`
+      }
       
       this.socket = new WebSocket(wsUrl)
       

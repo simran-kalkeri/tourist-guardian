@@ -24,15 +24,14 @@ class BlockchainService {
       // Connect to Ganache
       this.provider = new ethers.JsonRpcProvider("http://127.0.0.1:8545")
 
-      // Initialize admin wallet - Use the first Ganache account that has 1000 ETH
-      const adminPrivateKey = process.env.ADMIN_PRIVATE_KEY || "0xfe6f5790ddc08d50dd09ce0debe3ecb52e5defcb1c47c2a836a6be6a0ceb56a3"; // Ganache account[0]
-      this.adminWallet = new ethers.Wallet(adminPrivateKey, this.provider);
+      // Initialize admin wallet - default to Ganache account[0] from your list
+      const adminPrivateKey = process.env.ADMIN_PRIVATE_KEY || "0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d"
+      this.adminWallet = new ethers.Wallet(adminPrivateKey, this.provider)
       
       // Verify wallet has funds
       const balance = await this.adminWallet.provider.getBalance(this.adminWallet.address);
-      console.log("Admin wallet address:", this.adminWallet.address);
-      console.log("Expected address should be: 0x5f2B25F34c18E67D417416112A83116d2750cBDF");
-      console.log("Admin wallet balance:", ethers.formatEther(balance), "ETH");
+      console.log("Admin wallet address:", this.adminWallet.address)
+      console.log("Admin wallet balance:", ethers.formatEther(balance), "ETH")
       
       if (balance === 0n) {
         throw new Error("Admin wallet has no funds. Please ensure Ganache is running with the correct account.");
@@ -48,6 +47,53 @@ class BlockchainService {
     } catch (error) {
       console.error("Blockchain initialization failed:", error)
       return false
+    }
+  }
+
+  async registerTouristSecure(aadharHashHex, name, tripStart, tripEnd, emergencyContact) {
+    try {
+      if (!this.contract) {
+        throw new Error("Contract not initialized")
+      }
+
+      // Ensure hash is 0x-prefixed 32-byte hex
+      const hashBytes32 = aadharHashHex.startsWith('0x') ? aadharHashHex : `0x${aadharHashHex}`
+
+      const tx = await this.contract.registerTouristSecure(
+        hashBytes32,
+        name,
+        tripStart,
+        tripEnd,
+        emergencyContact,
+        {
+          gasLimit: 500000,
+          gasPrice: ethers.parseUnits("20", "gwei"),
+        }
+      )
+      const receipt = await tx.wait()
+
+      const event = receipt.logs.find((log) => {
+        try {
+          const parsed = this.contract.interface.parseLog(log)
+          return parsed.name === "TouristRegistered"
+        } catch {
+          return false
+        }
+      })
+
+      if (event) {
+        const parsed = this.contract.interface.parseLog(event)
+        return {
+          success: true,
+          touristId: Number(parsed.args[0]),
+          transactionHash: receipt.hash,
+        }
+      }
+
+      throw new Error("Tourist registration event not found")
+    } catch (error) {
+      console.error("Blockchain secure registration error:", error)
+      return { success: false, error: error.message }
     }
   }
 
@@ -105,22 +151,14 @@ class BlockchainService {
         throw new Error("Contract not initialized")
       }
 
-      // Convert coordinates to blockchain format (multiply by 1000000 for precision)
+      // Convert coordinates to blockchain format (multiply by 1e6 for precision)
       const lat = Math.floor(latitude * 1000000)
       const lng = Math.floor(longitude * 1000000)
 
-      // Check wallet balance
-      const balance = await this.adminWallet.provider.getBalance(this.adminWallet.address)
-      console.log("Wallet balance:", ethers.formatEther(balance), "ETH")
-
-      if (balance === 0n) {
-        throw new Error("Insufficient funds. Wallet has no ETH.")
-      }
-
-      // Use default gas settings instead of estimation to avoid issues
-      const tx = await this.contract.updateLocation(touristId, lat, lng, {
-        gasLimit: 200000, // Fixed gas limit
-        gasPrice: ethers.parseUnits("20", "gwei") // Fixed gas price
+      // Call contract's updateMyLocation (must be sent from tourist wallet in real flows)
+      const tx = await this.contract.updateMyLocation(lat, lng, {
+        gasLimit: 200000,
+        gasPrice: ethers.parseUnits("20", "gwei"),
       })
       const receipt = await tx.wait()
 
@@ -140,7 +178,11 @@ class BlockchainService {
         throw new Error("Contract not initialized")
       }
 
-      const tx = await this.contract.triggerSOS(touristId)
+      // Trigger SOS from the sender's context
+      const tx = await this.contract.triggerMySOS({
+        gasLimit: 200000,
+        gasPrice: ethers.parseUnits("20", "gwei"),
+      })
       const receipt = await tx.wait()
 
       return {
@@ -185,7 +227,7 @@ class BlockchainService {
         tourist: {
           id: Number(tourist.id),
           name: tourist.name,
-          aadharOrPassport: tourist.aadharOrPassport,
+          aadharOrPassportHash: tourist.aadharOrPassportHash,
           tripStart: Number(tourist.tripStart),
           tripEnd: Number(tourist.tripEnd),
           emergencyContact: tourist.emergencyContact,
@@ -214,7 +256,7 @@ class BlockchainService {
         tourists: tourists.map((tourist) => ({
           id: Number(tourist.id),
           name: tourist.name,
-          aadharOrPassport: tourist.aadharOrPassport,
+          aadharOrPassportHash: tourist.aadharOrPassportHash,
           tripStart: Number(tourist.tripStart),
           tripEnd: Number(tourist.tripEnd),
           emergencyContact: tourist.emergencyContact,

@@ -183,7 +183,12 @@ const TouristMap = ({ tourists, onResetSOS, alerts = [] }) => {
   const defaultZoom = 7
 
   // Filter tourists with valid coordinates
-  const validTourists = tourists.filter((tourist) => tourist.latitude !== 0 && tourist.longitude !== 0)
+  const withDisplay = tourists.map(t => ({
+    ...t,
+    latitude: (t.displayLatitude ?? t.latitude),
+    longitude: (t.displayLongitude ?? t.longitude)
+  }))
+  const validTourists = withDisplay.filter((tourist) => tourist.latitude !== 0 && tourist.longitude !== 0)
 
   const TouristPopup = ({ tourist }) => (
     <div className="p-4 min-w-64">
