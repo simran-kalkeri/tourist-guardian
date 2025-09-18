@@ -14,5 +14,13 @@
     "concurrently": "^8.2.2",
     "truffle": "^5.11.5"
   },
-  "keywords": ["blockchain", "tourist", "safety", "monitoring"]
+  "keywords": [
+    "blockchain",
+    "tourist",
+    "safety",
+    "monitoring"
+  ],
+  "dependencies": {
+    "axios": "^1.12.2"
+  }
 }

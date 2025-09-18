@@ -187,7 +187,9 @@ const WalletQueueService = require("./services/walletQueue")
 const WalletPoolService = require("./services/walletPool")
 const TXQueueService = require("./services/txQueue")
 const { auditRegistration, auditSOS, auditWalletRelease, auditPIIAccess, getAuditLogs } = require("./middleware/audit")
-const { geofenceService, GeofenceZone } = require("./services/geofence")
+// OLD GEOFENCING - Use routes instead of service
+// const { geofenceService, GeofenceZone } = require("./services/geofence")
+const geoFencingRoutes = require('./routes/geoFencing')
 const { anomalyDetectorService, AnomalyDetection } = require("./services/anomalyDetector")
 
 let blockchainService
@@ -234,9 +236,9 @@ async function initServices() {
     txQueue.startWorker()
     console.log("TX queue service initialized")
 
-    // Initialize geo-fence service
-    await geofenceService.initialize()
-    console.log("Geo-fence service initialized")
+    // OLD GEOFENCING - Initialize service
+    // await geofenceService.initialize()
+    console.log("Old geo-fencing service will be used via routes")
 
     // Initialize anomaly detector
     await anomalyDetectorService.initialize()
@@ -661,33 +663,31 @@ app.post("/api/tourists/:id/location", async (req, res) => {
       recentTicks.set(tid, arr)
     } catch {}
 
-    // Check geo-fencing
-    const geofenceResult = geofenceService.checkPointInZones(latitude, longitude)
-    if (geofenceResult.inZone) {
-      console.log(`🚨 Tourist ${id} entered risk zone:`, geofenceResult.zones)
+    // OLD GEOFENCING - Use the old service for checking zones
+    try {
+      const GeoFencingService = require('./services/geoFencingService')
+      const geofenceResult = await GeoFencingService.checkTouristLocation(
+        Number(id), 
+        latitude, 
+        longitude, 
+        tourist.name || 'Unknown Tourist'
+      )
       
-      // Send geo-fence alert
-      for (const zone of geofenceResult.zones) {
-        if (zone.autoAlert) {
-          // Enqueue geo-fence alert TX
-          const alertPayload = {
-            touristId: Number(id),
-            zoneName: zone.name,
-            zoneType: zone.zoneType,
-            severity: zone.severity,
-            alertMessage: zone.alertMessage,
-            location: { latitude, longitude },
-            timestamp: new Date().toISOString()
-          }
-          
-          txQueue.enqueueJob(
-            Number(id),
-            tourist.assignedWallet?.index || 0,
-            'geofence_alert',
-            alertPayload
-          )
-        }
+      if (geofenceResult.isInZone) {
+        console.log(`🚨 Tourist ${id} entered risk zone:`, geofenceResult.zones)
+        
+        // Broadcast geofence alert
+        broadcastToClients({
+          type: 'geofence_alert',
+          touristId: Number(id),
+          tourist: tourist,
+          zones: geofenceResult.zones,
+          alertRequired: geofenceResult.alert_required,
+          timestamp: new Date().toISOString()
+        })
       }
+    } catch (geoError) {
+      console.error('Geofencing check error:', geoError)
     }
 
     // Run anomaly detection
@@ -1076,6 +1076,21 @@ async function seedPoliceStationsIfEmpty() {
   }
 }
 
+// seed sample geofencing zones if empty
+async function seedSampleZonesIfEmpty() {
+  if (!isMongoConnected()) {
+    console.log("⚠️  MongoDB not available - skipping zone seeding")
+    return
+  }
+  
+  try {
+    const { seedSampleZones } = require('./data/sampleZones')
+    await seedSampleZones()
+  } catch (error) {
+    console.log('Sample zone seeding failed:', error.message)
+  }
+}
+
 // Start/Stop simulation
 app.post("/api/simulation/toggle", async (req, res) => {
   try {
@@ -1101,63 +1116,11 @@ app.post("/api/simulation/toggle", async (req, res) => {
 // Get audit logs (admin only)
 app.get("/api/admin/audit-logs", authenticateJWT, authorizeRole(['admin']), getAuditLogs)
 
-// Geo-fence endpoints
-app.get("/api/geofence/zones", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
-  try {
-    const zones = await geofenceService.getAllZones()
-    res.json({ success: true, zones })
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch zones: ' + error.message })
-  }
-})
+// OLD GEOFENCING ROUTES - Use the old proven geofencing system
+app.use('/api/geofencing', geoFencingRoutes)
 
-app.get("/api/geofence/stats", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
-  try {
-    const stats = await geofenceService.getZoneStats()
-    res.json({ success: true, stats })
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch zone stats: ' + error.message })
-  }
-})
-
-app.post("/api/geofence/zones", authenticateJWT, authorizeRole(['admin']), async (req, res) => {
-  try {
-    const result = await geofenceService.createZone(req.body)
-    if (result.success) {
-      res.json({ success: true, zone: result.zone })
-    } else {
-      res.status(400).json({ error: result.error })
-    }
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to create zone: ' + error.message })
-  }
-})
-
-app.patch("/api/geofence/zones/:id", authenticateJWT, authorizeRole(['admin']), async (req, res) => {
-  try {
-    const result = await geofenceService.updateZone(req.params.id, req.body)
-    if (result.success) {
-      res.json({ success: true, zone: result.zone })
-    } else {
-      res.status(400).json({ error: result.error })
-    }
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to update zone: ' + error.message })
-  }
-})
-
-app.delete("/api/geofence/zones/:id", authenticateJWT, authorizeRole(['admin']), async (req, res) => {
-  try {
-    const result = await geofenceService.deleteZone(req.params.id)
-    if (result.success) {
-      res.json({ success: true })
-    } else {
-      res.status(400).json({ error: result.error })
-    }
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to delete zone: ' + error.message })
-  }
-})
+// OLD GEOFENCING - Endpoints are now handled by the routes
+// (Geofencing endpoints have been moved to /api/geofencing/ routes)
 
 // Anomaly detection endpoints
 app.get("/api/anomalies", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
@@ -1296,8 +1259,10 @@ app.post("/api/ml/predict", async (req, res) => {
   }
 })
 
-// Cron job to clean up expired tourists (runs every hour)
-cron.schedule("0 * * * *", async () => {
+// Cron job to clean up expired tourists (TEMPORARILY DISABLED FOR TESTING)
+// cron.schedule("0 * * * *", async () => {
+setInterval(async () => {
+  // Run cleanup every 24 hours instead of every hour for testing
   try {
     console.log("Running cleanup job for expired tourists...")
 
@@ -1343,7 +1308,7 @@ cron.schedule("0 * * * *", async () => {
   } catch (error) {
     console.error("Cleanup job error:", error)
   }
-})
+}, 24 * 60 * 60 * 1000) // Run every 24 hours instead of every hour
 
 // Lightweight periodic anomaly scan using in-memory ticks
 setInterval(() => {
@@ -1439,6 +1404,7 @@ async function startServer() {
     // Make sure indexes are correct before starting
     await ensureTouristIndexes()
     await seedPoliceStationsIfEmpty()
+    await seedSampleZonesIfEmpty()
   } else {
     console.log("⚠️  Skipping MongoDB-dependent initialization (connection not available)")
   }
