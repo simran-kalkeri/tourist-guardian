@@ -98,57 +98,73 @@ const AdminDashboard = () => {
 
   const fetchAnalytics = useCallback(async () => {
     try {
-      const response = await fetch(`${apiBase}/api/analytics`)
+      const token = localStorage.getItem('authToken')
+      const headers = {
+        'Content-Type': 'application/json'
+      }
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+      
+      const response = await fetch(`${apiBase}/api/analytics`, { headers })
       const result = await response.json()
 
       if (result.success) {
         setAnalytics(result.analytics)
+      } else {
+        console.error("Analytics API error:", result.error)
       }
     } catch (error) {
       console.error("Failed to fetch analytics:", error)
     }
-  }, [])
+  }, [apiBase])
 
   const fetchAlerts = useCallback(async () => {
     try {
-      const response = await fetch(`${apiBase}/api/alerts`)
+      const token = localStorage.getItem('authToken')
+      const headers = {
+        'Content-Type': 'application/json'
+      }
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+      
+      const response = await fetch(`${apiBase}/api/alerts`, { headers })
       const result = await response.json()
       if (result.success) setAlerts(result.alerts || [])
     } catch (e) {
       console.error("Failed to fetch alerts:", e)
     }
-  }, [])
+  }, [apiBase])
 
   const fetchEfirs = useCallback(async () => {
     try {
-      const response = await fetch(`${apiBase}/api/efir`)
+      const token = localStorage.getItem('authToken')
+      const headers = {
+        'Content-Type': 'application/json'
+      }
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+      
+      const response = await fetch(`${apiBase}/api/efir`, { headers })
       const result = await response.json()
       if (result.success) setEfirs(result.efirs || [])
     } catch (e) {
       console.error("Failed to fetch e-firs:", e)
     }
-  }, [])
+  }, [apiBase])
 
   const updateStats = (touristData) => {
     const total = touristData.length
     const active = touristData.filter((t) => t.isActive).length
     const sosAlerts = touristData.filter((t) => t.sosActive).length
 
-    const areas = touristData.reduce((acc, tourist) => {
-      const area = getAreaFromCoordinates(tourist.latitude, tourist.longitude)
-      acc[area] = (acc[area] || 0) + 1
-      return acc
-    }, {})
-
-    setStats({ total, active, sosAlerts, areas })
-  }
-
-  const getAreaFromCoordinates = (lat, lng) => {
-    if (lat === 0 && lng === 0) return "Unknown"
-    if (lat > 20) return "Mountains"
-    if (lat > 10) return "Downtown"
-    if (lat > 0) return "Beach"
-    return "Historic"
+    // Areas will be populated from analytics data instead of calculating here
+    setStats({ total, active, sosAlerts, areas: {} })
   }
 
   // Initial data fetch
@@ -183,7 +199,51 @@ const AdminDashboard = () => {
             : tourist
         )
       )
+      
+      // Add SOS alert to alerts list
+      const sosAlert = {
+        type: 'sos_alert',
+        touristId: data.touristId,
+        message: `SOS alert triggered by ${data.tourist?.name || `Tourist #${data.touristId}`}`,
+        severity: 'high',
+        timestamp: data.timestamp || new Date().toISOString(),
+        handled: false
+      }
+      setAlerts(prevAlerts => [sosAlert, ...prevAlerts])
       setLastUpdate(new Date())
+    })
+    
+    // Listen for geofencing alerts
+    websocketService.on('geofence_alert', (data) => {
+      const geofenceAlert = {
+        type: 'geofence_alert',
+        touristId: data.touristId,
+        message: `Tourist entered risk zone: ${data.zones?.map(z => z.name).join(', ') || 'Unknown zone'}`,
+        severity: data.alertRequired ? 'high' : 'warn',
+        timestamp: data.timestamp || new Date().toISOString(),
+        handled: false
+      }
+      setAlerts(prevAlerts => [geofenceAlert, ...prevAlerts])
+    })
+    
+    // Listen for anomaly alerts
+    websocketService.on('anomaly_alert', (data) => {
+      const anomalyAlert = {
+        type: 'anomaly_alert',
+        touristId: data.alert?.touristId,
+        message: data.alert?.message || 'Anomaly detected',
+        severity: data.alert?.severity || 'warn',
+        timestamp: data.alert?.timestamp || new Date().toISOString(),
+        handled: false
+      }
+      setAlerts(prevAlerts => [anomalyAlert, ...prevAlerts])
+    })
+    
+    // Listen for E-FIR creation
+    websocketService.on('efir_created', (data) => {
+      if (data.efir) {
+        setEfirs(prevEfirs => [data.efir, ...prevEfirs])
+      }
     })
     
     return () => {
@@ -195,10 +255,24 @@ const AdminDashboard = () => {
   useEffect(() => {
     const interval = setInterval(() => {
       fetchTourists()
+      fetchAnalytics() // Add analytics refresh
+      fetchAlerts() // Add alerts refresh for fallback
     }, 5000)
     
     return () => clearInterval(interval)
-  }, [fetchTourists])
+  }, [fetchTourists, fetchAnalytics, fetchAlerts])
+  
+  // Update stats when analytics data changes
+  useEffect(() => {
+    if (analytics) {
+      setStats(prevStats => ({
+        ...prevStats,
+        areas: analytics.areaStats || {},
+        // Update SOS count from analytics if available
+        sosAlerts: analytics.sosAlerts || prevStats.sosAlerts
+      }))
+    }
+  }, [analytics])
 
   useEffect(() => {
     let filtered = tourists
@@ -256,6 +330,35 @@ const AdminDashboard = () => {
     } catch (error) {
       console.error("Failed to create E-FIR:", error)
     }
+  }
+
+  const handleAlert = (alertIndex, action) => {
+    setAlerts(prevAlerts => 
+      prevAlerts.map((alert, index) => 
+        index === alertIndex ? { ...alert, handled: true } : alert
+      )
+    )
+  }
+  
+  // Test function to generate sample alerts
+  const generateTestAlert = (type = 'sos_alert') => {
+    const testAlert = {
+      type: type,
+      touristId: Math.floor(Math.random() * 1000),
+      message: `Test ${type.replace('_', ' ')} - ${new Date().toLocaleTimeString()}`,
+      severity: type.includes('sos') ? 'high' : 'warn',
+      timestamp: new Date().toISOString(),
+      handled: false
+    }
+    setAlerts(prevAlerts => [testAlert, ...prevAlerts])
+    console.log('Generated test alert:', testAlert)
+  }
+  
+  // Generate multiple test alerts
+  const generateMultipleTestAlerts = () => {
+    generateTestAlert('sos_alert')
+    setTimeout(() => generateTestAlert('geofence_alert'), 500)
+    setTimeout(() => generateTestAlert('anomaly_alert'), 1000)
   }
 
   const fetchSafetyScore = async (touristId) => {
@@ -566,36 +669,150 @@ const AdminDashboard = () => {
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent Alerts</h3>
-                <div className="space-y-3 max-h-80 overflow-auto">
-                  {alerts.length === 0 && <p className="text-gray-500">No alerts</p>}
-                  {alerts.slice().reverse().map((a, idx) => (
-                    <div key={idx} className="flex items-start justify-between p-3 rounded-lg border">
-                      <div>
-                        <div className="text-sm font-medium text-gray-900">{a.type.replaceAll('_', ' ')}</div>
-                        <div className="text-xs text-gray-500">Tourist #{a.touristId} • {new Date(a.timestamp).toLocaleString()}</div>
-                        <div className="text-sm text-gray-700 mt-1">{a.message}</div>
-                      </div>
-                      <span className={`text-xs px-2 py-1 rounded ${a.severity === 'warn' ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'}`}>{a.severity}</span>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900">Recent Alerts</h3>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => generateTestAlert('sos_alert')}
+                      className="px-2 py-1 bg-red-100 text-red-700 hover:bg-red-200 rounded text-xs font-medium"
+                    >
+                      Test SOS
+                    </button>
+                    <button
+                      onClick={() => generateTestAlert('geofence_alert')}
+                      className="px-2 py-1 bg-orange-100 text-orange-700 hover:bg-orange-200 rounded text-xs font-medium"
+                    >
+                      Test Geofence
+                    </button>
+                    <button
+                      onClick={generateMultipleTestAlerts}
+                      className="px-2 py-1 bg-blue-100 text-blue-700 hover:bg-blue-200 rounded text-xs font-medium"
+                    >
+                      Test All
+                    </button>
+                    <div className="text-xs text-gray-500 ml-2">
+                      {alerts.filter(a => !a.handled).length} active
                     </div>
-                  ))}
+                  </div>
+                </div>
+                <div className="space-y-3 max-h-80 overflow-auto">
+                  {alerts.length === 0 && (
+                    <div className="text-center py-8">
+                      <CheckCircle className="w-8 h-8 text-green-500 mx-auto mb-2" />
+                      <p className="text-gray-500">No alerts available</p>
+                      <p className="text-xs text-gray-400 mt-2">
+                        {!websocketService?.isConnected() ? 'WebSocket disconnected - some alerts may not appear in real-time' : ''}
+                      </p>
+                    </div>
+                  )}
+                  {alerts.filter(a => !a.handled).slice().reverse().map((a, idx) => {
+                    const getAlertIcon = () => {
+                      if (a.type.includes('sos')) return <AlertTriangle className="w-4 h-4 text-red-500" />
+                      if (a.type.includes('geofence')) return <MapPin className="w-4 h-4 text-orange-500" />
+                      if (a.type.includes('emergency')) return <AlertCircle className="w-4 h-4 text-red-600" />
+                      return <Activity className="w-4 h-4 text-blue-500" />
+                    }
+                    
+                    const getAlertColor = () => {
+                      if (a.severity === 'high') return 'border-l-red-500 bg-red-50'
+                      if (a.severity === 'warn') return 'border-l-yellow-500 bg-yellow-50'
+                      return 'border-l-blue-500 bg-blue-50'
+                    }
+                    
+                    return (
+                      <div key={idx} className={`p-3 rounded-lg border-l-4 ${getAlertColor()}`}>
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-start gap-2 flex-1">
+                            {getAlertIcon()}
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="text-sm font-medium text-gray-900">
+                                  {a.type.replaceAll('_', ' ').toUpperCase()}
+                                </span>
+                                <span className={`text-xs px-2 py-1 rounded-full ${
+                                  a.severity === 'high' ? 'bg-red-100 text-red-700' :
+                                  a.severity === 'warn' ? 'bg-yellow-100 text-yellow-700' :
+                                  'bg-blue-100 text-blue-700'
+                                }`}>{a.severity}</span>
+                              </div>
+                              <div className="text-xs text-gray-500 mb-2">
+                                Tourist #{a.touristId} • {new Date(a.timestamp).toLocaleString()}
+                              </div>
+                              <div className="text-sm text-gray-700">{a.message}</div>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleAlert(idx, 'handled')}
+                            className="ml-2 px-3 py-1 bg-green-100 text-green-700 hover:bg-green-200 rounded-md text-xs font-medium transition-colors"
+                          >
+                            Mark Handled
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
 
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-                <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent E-FIRs</h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900">Recent E-FIRs</h3>
+                  <div className="text-xs text-gray-500">
+                    {efirs.length} total
+                  </div>
+                </div>
                 <div className="space-y-3 max-h-80 overflow-auto">
-                  {efirs.length === 0 && <p className="text-gray-500">No E-FIRs</p>}
-                  {efirs.slice().reverse().map((e) => (
-                    <div key={e.id} className="p-3 rounded-lg border">
-                      <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium text-gray-900">{e.id}</div>
-                        <div className="text-xs text-gray-500">{new Date(e.generatedAt).toLocaleString()}</div>
-                      </div>
-                      <div className="text-xs text-gray-600 mt-1">Tourist #{e.touristId} • {e.name}</div>
-                      <div className="text-sm text-gray-700 mt-1">{e.reason}</div>
+                  {efirs.length === 0 && (
+                    <div className="text-center py-8">
+                      <Shield className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                      <p className="text-gray-500">No E-FIRs generated</p>
                     </div>
-                  ))}
+                  )}
+                  {efirs.slice().reverse().map((e) => {
+                    const getStatusColor = () => {
+                      switch (e.status) {
+                        case 'pending': return 'bg-yellow-100 text-yellow-800 border-yellow-200'
+                        case 'in_progress': return 'bg-blue-100 text-blue-800 border-blue-200'
+                        case 'resolved': return 'bg-green-100 text-green-800 border-green-200'
+                        case 'closed': return 'bg-gray-100 text-gray-800 border-gray-200'
+                        default: return 'bg-gray-100 text-gray-800 border-gray-200'
+                      }
+                    }
+                    
+                    return (
+                      <div key={e.id || e.efirNumber} className="p-3 rounded-lg border hover:bg-gray-50 transition-colors">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-gray-900">
+                              {e.efirNumber || e.id}
+                            </span>
+                            <span className={`text-xs px-2 py-1 rounded border ${getStatusColor()}`}>
+                              {e.status || 'pending'}
+                            </span>
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {new Date(e.generatedAt || e.createdAt).toLocaleString()}
+                          </div>
+                        </div>
+                        <div className="text-xs text-gray-600 mb-2">
+                          Tourist #{e.touristId} • {e.touristName || e.name || 'Unknown'}
+                        </div>
+                        <div className="text-sm text-gray-700 mb-2">
+                          {e.incidentType || e.reason || 'General Safety Alert'}
+                        </div>
+                        {e.assignedStationName && (
+                          <div className="text-xs text-blue-600">
+                            Assigned to: {e.assignedStationName}
+                          </div>
+                        )}
+                        {e.description && (
+                          <div className="text-xs text-gray-500 mt-1 truncate">
+                            {e.description}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
             </div>

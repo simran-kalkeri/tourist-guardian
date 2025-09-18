@@ -8,20 +8,38 @@ const AnalyticsDashboard = () => {
   const [analytics, setAnalytics] = useState(null)
   const [simulationStats, setSimulationStats] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState(null)
   const [lastUpdate, setLastUpdate] = useState(new Date())
 
   // Fetch analytics data
   const fetchAnalytics = async () => {
     try {
-      const response = await fetch("http://localhost:5000/api/analytics")
+      setError(null)
+      const token = localStorage.getItem('authToken')
+      const headers = {
+        'Content-Type': 'application/json'
+      }
+      
+      if (!token) {
+        throw new Error('No authentication token found. Please log in again.')
+      }
+      
+      headers['Authorization'] = `Bearer ${token}`
+      
+      const response = await fetch("http://localhost:5000/api/analytics", {
+        headers
+      })
       const result = await response.json()
 
       if (result.success) {
         setAnalytics(result.analytics)
         setLastUpdate(new Date())
+      } else {
+        throw new Error(result.error || 'Failed to fetch analytics data')
       }
     } catch (error) {
       console.error("Failed to fetch analytics:", error)
+      setError(error.message)
     } finally {
       setIsLoading(false)
     }
@@ -30,11 +48,27 @@ const AnalyticsDashboard = () => {
   // Fetch simulation stats
   const fetchSimulationStats = async () => {
     try {
-      const response = await fetch("http://localhost:5000/api/simulation/stats")
+      const token = localStorage.getItem('authToken')
+      const headers = {
+        'Content-Type': 'application/json'
+      }
+      
+      if (!token) {
+        console.warn('No authentication token found for simulation stats')
+        return
+      }
+      
+      headers['Authorization'] = `Bearer ${token}`
+      
+      const response = await fetch("http://localhost:5000/api/simulation/stats", {
+        headers
+      })
       const result = await response.json()
 
       if (result.success) {
         setSimulationStats(result.stats)
+      } else {
+        console.error("Simulation stats API error:", result.error)
       }
     } catch (error) {
       console.error("Failed to fetch simulation stats:", error)
@@ -44,14 +78,26 @@ const AnalyticsDashboard = () => {
   // Toggle simulation
   const toggleSimulation = async () => {
     try {
+      const token = localStorage.getItem('authToken')
+      const headers = {
+        'Content-Type': 'application/json'
+      }
+      
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+      
       const response = await fetch("http://localhost:5000/api/simulation/toggle", {
         method: "POST",
+        headers
       })
 
       const result = await response.json()
 
       if (result.success) {
         await fetchSimulationStats()
+      } else {
+        console.error("Toggle simulation API error:", result.error)
       }
     } catch (error) {
       console.error("Failed to toggle simulation:", error)
@@ -72,16 +118,17 @@ const AnalyticsDashboard = () => {
   }, [])
 
   // Prepare chart data
-  const areaChartData = analytics
+  const areaChartData = analytics && analytics.areaStats
     ? Object.entries(analytics.areaStats).map(([area, stats]) => ({
         area,
-        total: stats.total,
-        sos: stats.sos,
-        safe: stats.total - stats.sos,
+        total: stats.total || 0,
+        sos: stats.sos || 0,
+        safe: (stats.total || 0) - (stats.sos || 0),
       }))
     : []
 
   const hourlyActivityData = analytics?.hourlyActivity || []
+  const sosAlertsOverTimeData = analytics?.sosAlertsOverTime || []
 
   const MetricCard = ({ title, value, change, icon: Icon, color, subtitle }) => (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -109,6 +156,29 @@ const AnalyticsDashboard = () => {
       <div className="flex items-center justify-center py-12">
         <div className="w-8 h-8 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin"></div>
         <span className="ml-3 text-gray-600">Loading analytics...</span>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12">
+        <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mb-4">
+          <AlertTriangle className="w-8 h-8 text-red-600" />
+        </div>
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">Analytics Unavailable</h3>
+        <p className="text-gray-600 text-center mb-4 max-w-md">{error}</p>
+        <button 
+          onClick={() => {
+            setError(null)
+            setIsLoading(true)
+            fetchAnalytics()
+            fetchSimulationStats()
+          }}
+          className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors"
+        >
+          Retry
+        </button>
       </div>
     )
   }

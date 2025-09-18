@@ -1201,6 +1201,54 @@ app.get("/api/analytics", authenticateJWT, authorizeRole(['admin', 'police', 'to
       isActive: true,
     }).sort({ updatedAt: -1 })
 
+    // Generate hourly activity data for the last 24 hours
+    const hourlyActivity = []
+    for (let hour = 0; hour < 24; hour++) {
+      const hourStart = new Date()
+      hourStart.setHours(hour, 0, 0, 0)
+      const hourEnd = new Date()
+      hourEnd.setHours(hour, 59, 59, 999)
+      
+      // Count activity and alerts for this hour
+      const hourActivity = recentActivity.filter(t => {
+        const updatedHour = new Date(t.updatedAt).getHours()
+        return updatedHour === hour
+      }).length
+      
+      const hourAlerts = alerts.filter(alert => {
+        const alertHour = new Date(alert.timestamp).getHours()
+        const alertDate = new Date(alert.timestamp)
+        return alertHour === hour && alertDate >= last24Hours
+      }).length
+      
+      hourlyActivity.push({
+        hour: hour.toString().padStart(2, '0') + ':00',
+        activity: hourActivity,
+        alerts: hourAlerts
+      })
+    }
+
+    // Generate SOS alerts over time data (last 7 days)
+    const sosAlertsOverTime = []
+    for (let day = 6; day >= 0; day--) {
+      const date = new Date()
+      date.setDate(date.getDate() - day)
+      date.setHours(0, 0, 0, 0)
+      const nextDay = new Date(date)
+      nextDay.setDate(nextDay.getDate() + 1)
+      
+      const dayAlerts = alerts.filter(alert => {
+        const alertDate = new Date(alert.timestamp)
+        return alertDate >= date && alertDate < nextDay && 
+               (alert.type === 'sos_alert' || alert.type === 'sos')
+      }).length
+      
+      sosAlertsOverTime.push({
+        time: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        alerts: dayAlerts
+      })
+    }
+
     res.json({
       success: true,
       analytics: {
@@ -1209,6 +1257,8 @@ app.get("/api/analytics", authenticateJWT, authorizeRole(['admin', 'police', 'to
         sosAlerts,
         areaStats,
         recentActivity: recentActivity.slice(0, 10), // Last 10 activities
+        hourlyActivity,
+        sosAlertsOverTime,
         simulationStats: iotSimulation ? iotSimulation.getSimulationStats() : null,
         alertsLast10: alerts.slice(-10)
       },
@@ -1219,12 +1269,30 @@ app.get("/api/analytics", authenticateJWT, authorizeRole(['admin', 'police', 'to
   }
 })
 
-// Helper function for area calculation
+// Helper function for area classification
 function getAreaFromCoordinates(lat, lng) {
   if (lat === 0 && lng === 0) return "Unknown"
-  if (lat > 29) return "Mountains"
-  if (lat > 28.5) return "Downtown"
-  if (lat > 28) return "Suburbs"
+  
+  // Area classification based on coordinate ranges to ensure variety
+  // Mountains: Higher latitudes in the region
+  if (lat >= 27.0 && lat < 28.0 && lng >= 92.6 && lng <= 93.0) return "Mountains"
+  
+  // Forests: Mid-latitude forest regions
+  if (lat >= 26.3 && lat < 27.0 && lng >= 92.7 && lng <= 93.0) return "Forests"
+  
+  // Urban: Major city areas and populated centers
+  if ((lat >= 28.5 && lat <= 28.8 && lng >= 77 && lng <= 77.5) || // Delhi
+      (lat >= 19 && lat <= 19.3 && lng >= 72.7 && lng <= 73.1) || // Mumbai
+      (lat >= 26.8 && lat <= 27.2 && lng >= 75.6 && lng <= 76.1) || // Jaipur
+      (lat >= 26.1 && lat <= 26.4 && lng >= 91.7 && lng <= 92.1) || // Guwahati
+      (lat >= 26.15 && lat < 26.3 && lng >= 92.8 && lng <= 93.0)) return "Urban"
+  
+  // Rural: Agricultural and village areas
+  if ((lat >= 26 && lat <= 29 && lng >= 76 && lng <= 85) || 
+      (lat >= 25.9 && lat < 26.15 && lng >= 92.6 && lng <= 92.9) || 
+      (lat >= 22 && lat <= 26 && lng >= 85 && lng <= 90)) return "Rural"
+  
+  // Outskirts: Everything else (remote areas, outskirts of cities)
   return "Outskirts"
 }
 

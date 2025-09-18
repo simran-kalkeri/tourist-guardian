@@ -16,17 +16,36 @@ const AdminLogin = ({ onLogin }) => {
     setIsLoading(true)
     setError("")
 
-    // Hardcoded admin credentials as specified
-    if (credentials.username === "admin" && credentials.password === "admin123") {
-      setTimeout(() => {
+    try {
+      const response = await fetch("http://localhost:5000/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: credentials.username,
+          password: credentials.password,
+        }),
+      })
+
+      const result = await response.json()
+
+      if (result.success) {
+        // Store the JWT token in localStorage
+        localStorage.setItem('authToken', result.token)
+        localStorage.setItem('userRole', result.user.role)
+        localStorage.setItem('username', result.user.username)
+        
         setIsLoading(false)
         onLogin(true)
-      }, 1000)
-    } else {
-      setTimeout(() => {
+      } else {
         setIsLoading(false)
-        setError("Invalid username or password")
-      }, 1000)
+        setError(result.error || result.message || "Login failed")
+      }
+    } catch (error) {
+      console.error("Login error:", error)
+      setIsLoading(false)
+      setError("Failed to connect to server. Please check if the backend is running.")
     }
   }
 
