@@ -1447,6 +1447,48 @@ setInterval(() => {
   }
 }, 60 * 1000) // every minute
 
+// Periodic geofencing check for all active tourists
+setInterval(async () => {
+  try {
+    if (!isMongoConnected()) return
+    
+    const GeoFencingService = require('./services/geoFencingService')
+    const tourists = await Tourist.find({ isActive: true }).limit(100)
+    
+    for (const tourist of tourists) {
+      if (!tourist.latitude || !tourist.longitude) continue
+      
+      try {
+        const geofenceResult = await GeoFencingService.checkTouristLocation(
+          tourist.blockchainId,
+          tourist.latitude,
+          tourist.longitude,
+          tourist.name || 'Unknown Tourist'
+        )
+        
+        if (geofenceResult.isInZone && geofenceResult.alert_required) {
+          console.log(`🚨 Periodic check: Tourist ${tourist.blockchainId} (${tourist.name}) in high-risk zone`)
+          
+          // Broadcast geofence alert via WebSocket
+          broadcastToClients({
+            type: 'geofence_alert',
+            touristId: tourist.blockchainId,
+            tourist: tourist,
+            zones: geofenceResult.zones,
+            alertRequired: geofenceResult.alert_required,
+            timestamp: new Date().toISOString(),
+            source: 'periodic_check'
+          })
+        }
+      } catch (geoError) {
+        console.error(`Geofencing periodic check error for tourist ${tourist.blockchainId}:`, geoError.message)
+      }
+    }
+  } catch (error) {
+    console.error('Periodic geofencing check error:', error)
+  }
+}, 2 * 60 * 1000) // every 2 minutes
+
 // Error handling middleware
 app.use((error, req, res, next) => {
   console.error("Server error:", error)

@@ -1,35 +1,34 @@
-// OLD GEOFENCING SERVICE FROM tourist-guardian-old
-// This replaces the new geofencing logic with the proven working version
+// ENHANCED GEOFENCING SERVICE with Real-time Tracking and Database Persistence
 const Zone = require('../models/zone');
+const GeofenceAlert = require('../models/GeofenceAlert');
 
 class GeoFencingService {
   constructor() {
-    this.activeAlerts = new Map(); // Store active alerts for tourists
-    this.alertHistory = []; // Store alert history
+    this.touristZoneStatus = new Map(); // Track which zones tourists are currently in
+    this.alertHistory = []; // Keep memory cache for fast access
   }
 
-  // Check if tourist location is in any zone and trigger alerts
+  // Enhanced method to check tourist location and manage real-time zone status
   async checkTouristLocation(touristId, latitude, longitude, touristName = 'Unknown') {
     try {
       const zones = await Zone.find({ alert_enabled: true });
-      const matchingZones = [];
+      const currentZones = [];
       
+      // Check which zones the tourist is currently in
       for (const zone of zones) {
         let isInZone = false;
         
         if (zone.zone_type === 'circle') {
-          // Check if point is within circular zone
           const distance = this.getDistanceFromLatLonInMeters(
             latitude, longitude, zone.latitude, zone.longitude
           );
           isInZone = distance <= zone.radius;
         } else if (zone.zone_type === 'polygon' && zone.polygon_coordinates.length > 0) {
-          // Check if point is within polygon zone
           isInZone = this.isPointInPolygon(latitude, longitude, zone.polygon_coordinates);
         }
         
         if (isInZone) {
-          matchingZones.push({
+          currentZones.push({
             zone_id: zone.zone_id,
             name: zone.name,
             safety_score: zone.safety_score,
@@ -41,15 +40,36 @@ class GeoFencingService {
         }
       }
       
-      // Process alerts for matching zones
-      if (matchingZones.length > 0) {
-        await this.processAlerts(touristId, latitude, longitude, touristName, matchingZones);
+      // Get previously tracked zones for this tourist
+      const touristKey = `tourist_${touristId}`;
+      const previousZones = this.touristZoneStatus.get(touristKey) || new Set();
+      const currentZoneIds = new Set(currentZones.map(z => z.zone_id));
+      
+      // Detect zone entries (new zones)
+      const enteredZones = currentZones.filter(zone => !previousZones.has(zone.zone_id));
+      
+      // Detect zone exits (zones no longer present)
+      const exitedZoneIds = [...previousZones].filter(zoneId => !currentZoneIds.has(zoneId));
+      
+      // Process zone entries
+      for (const zone of enteredZones) {
+        await this.processZoneEntry(touristId, latitude, longitude, touristName, zone);
       }
       
+      // Process zone exits
+      for (const zoneId of exitedZoneIds) {
+        await this.processZoneExit(touristId, latitude, longitude, touristName, zoneId);
+      }
+      
+      // Update tracking
+      this.touristZoneStatus.set(touristKey, currentZoneIds);
+      
       return {
-        isInZone: matchingZones.length > 0,
-        zones: matchingZones,
-        alert_required: matchingZones.some(z => z.risk_level === 'high')
+        isInZone: currentZones.length > 0,
+        zones: currentZones,
+        alert_required: currentZones.some(z => z.risk_level === 'high'),
+        enteredZones: enteredZones.length,
+        exitedZones: exitedZoneIds.length
       };
     } catch (error) {
       console.error('Error checking tourist location:', error);
@@ -57,48 +77,192 @@ class GeoFencingService {
     }
   }
 
-  // Process alerts for tourist entering zones
-  async processAlerts(touristId, latitude, longitude, touristName, zones) {
-    const alertKey = `${touristId}_${zones[0].zone_id}`;
-    const currentTime = new Date();
-    
-    // Check if alert already exists and is recent (within 5 minutes)
-    if (this.activeAlerts.has(alertKey)) {
-      const lastAlert = this.activeAlerts.get(alertKey);
-      const timeDiff = currentTime - lastAlert.timestamp;
-      if (timeDiff < 5 * 60 * 1000) { // 5 minutes
-        return; // Don't send duplicate alert
+  // Process tourist entering a zone
+  async processZoneEntry(touristId, latitude, longitude, touristName, zone) {
+    try {
+      const currentTime = new Date();
+      
+      // Create database record for zone entry
+      const alertData = {
+        touristId,
+        touristName,
+        latitude,
+        longitude,
+        zoneId: zone.zone_id,
+        zoneName: zone.name,
+        zoneRiskLevel: zone.risk_level,
+        alertType: 'geofence_alert',
+        eventType: 'zone_entry',
+        severity: zone.risk_level,
+        status: 'active',
+        message: this.generateAlertMessage([zone]),
+        description: `Tourist ${touristName} entered ${zone.risk_level}-risk zone: ${zone.name}`,
+        entryTime: currentTime,
+        exitTime: null,
+        zoneDetails: {
+          safetyScore: zone.safety_score,
+          alertMessage: zone.alert_message,
+          recommendations: zone.recommendations
+        },
+        autoNotifyAuthorities: zone.auto_notify_authorities
+      };
+      
+      // Save to database
+      const geofenceAlert = new GeofenceAlert(alertData);
+      await geofenceAlert.save();
+      
+      // Create alert for broadcasting/notifications
+      const broadcastAlert = {
+        type: 'geofence_alert',
+        touristId,
+        touristName,
+        latitude,
+        longitude,
+        zones: [zone],
+        timestamp: currentTime,
+        alertLevel: zone.risk_level,
+        severity: zone.risk_level,
+        message: alertData.message,
+        description: alertData.description,
+        status: 'active',
+        dbId: geofenceAlert._id
+      };
+      
+      // Add to memory cache
+      this.alertHistory.push(broadcastAlert);
+      
+      // Send notifications
+      await this.sendNotifications(broadcastAlert);
+      
+      // Auto-notify authorities for high-risk zones
+      if (zone.risk_level === 'high' && zone.auto_notify_authorities) {
+        await this.notifyAuthorities(broadcastAlert, [zone]);
       }
+      
+      console.log(`🚨 Zone entry: ${touristName} entered ${zone.risk_level}-risk zone ${zone.name}`);
+      
+      return broadcastAlert;
+    } catch (error) {
+      console.error('Error processing zone entry:', error);
     }
-    
-    // Create alert
-    const alert = {
-      touristId,
-      touristName,
-      latitude,
-      longitude,
-      zones,
-      timestamp: currentTime,
-      alertLevel: this.getAlertLevel(zones),
-      message: this.generateAlertMessage(zones)
+  }
+  
+  // Process tourist exiting a zone
+  async processZoneExit(touristId, latitude, longitude, touristName, zoneId) {
+    try {
+      // Find active alert in database and mark as exited
+      const activeAlert = await GeofenceAlert.findOne({
+        touristId,
+        zoneId,
+        status: 'active',
+        exitTime: null
+      }).sort({ entryTime: -1 });
+      
+      if (activeAlert) {
+        // Mark as exited
+        await activeAlert.markAsExited({ latitude, longitude });
+        
+        console.log(`✅ Zone exit: ${touristName} left zone ${activeAlert.zoneName} (${activeAlert.zoneRiskLevel}-risk)`);
+        
+        // Create exit event record
+        const exitAlert = new GeofenceAlert({
+          touristId,
+          touristName,
+          latitude,
+          longitude,
+          zoneId,
+          zoneName: activeAlert.zoneName,
+          zoneRiskLevel: activeAlert.zoneRiskLevel,
+          alertType: 'geofence_alert',
+          eventType: 'zone_exit',
+          severity: 'low', // Exit events are low severity
+          status: 'resolved',
+          message: `Tourist ${touristName} has left ${activeAlert.zoneName}`,
+          description: `Tourist ${touristName} exited ${activeAlert.zoneRiskLevel}-risk zone: ${activeAlert.zoneName}`,
+          entryTime: new Date(), // For exit events, entryTime is the exit time
+          exitTime: null,
+          zoneDetails: activeAlert.zoneDetails
+        });
+        
+        await exitAlert.save();
+        
+        return {
+          type: 'zone_exit',
+          touristId,
+          touristName,
+          zoneId,
+          zoneName: activeAlert.zoneName,
+          timestamp: new Date()
+        };
+      }
+    } catch (error) {
+      console.error('Error processing zone exit:', error);
+    }
+  }
+
+  // Get currently active alerts for a tourist (database-based)
+  async getActiveAlerts(touristId) {
+    try {
+      const alerts = await GeofenceAlert.findActiveAlertsForTourist(touristId);
+      return alerts.map(alert => this.formatAlertForAPI(alert));
+    } catch (error) {
+      console.error('Error getting active alerts:', error);
+      return [];
+    }
+  }
+
+  // Get all currently active critical alerts (database-based)
+  async getActiveCriticalAlerts() {
+    try {
+      const alerts = await GeofenceAlert.findActiveCriticalAlerts();
+      return alerts.map(alert => this.formatAlertForAPI(alert));
+    } catch (error) {
+      console.error('Error getting critical alerts:', error);
+      return [];
+    }
+  }
+
+  // Get alert history with optional filters (database-based)
+  async getAlertHistory(filters = {}) {
+    try {
+      // Set default limit
+      if (!filters.limit) filters.limit = 100;
+      
+      const alerts = await GeofenceAlert.getAlertHistory(filters);
+      return alerts.map(alert => this.formatAlertForAPI(alert));
+    } catch (error) {
+      console.error('Error getting alert history:', error);
+      return this.alertHistory; // Fallback to memory cache
+    }
+  }
+
+  // Format database alert for API response
+  formatAlertForAPI(dbAlert) {
+    return {
+      type: dbAlert.alertType,
+      touristId: dbAlert.touristId,
+      touristName: dbAlert.touristName,
+      latitude: dbAlert.latitude,
+      longitude: dbAlert.longitude,
+      zones: [{
+        zone_id: dbAlert.zoneId,
+        name: dbAlert.zoneName,
+        safety_score: dbAlert.zoneDetails?.safetyScore,
+        risk_level: dbAlert.zoneRiskLevel,
+        alert_message: dbAlert.zoneDetails?.alertMessage,
+        recommendations: dbAlert.zoneDetails?.recommendations || [],
+        auto_notify_authorities: dbAlert.autoNotifyAuthorities
+      }],
+      timestamp: dbAlert.entryTime,
+      alertLevel: dbAlert.zoneRiskLevel,
+      severity: dbAlert.severity,
+      message: dbAlert.message,
+      description: dbAlert.description,
+      status: dbAlert.status,
+      eventType: dbAlert.eventType,
+      exitTime: dbAlert.exitTime,
+      durationInZone: dbAlert.durationInZone
     };
-    
-    // Store active alert
-    this.activeAlerts.set(alertKey, alert);
-    
-    // Add to history
-    this.alertHistory.push(alert);
-    
-    // Send notifications
-    await this.sendNotifications(alert);
-    
-    // Auto-notify authorities for high-risk zones
-    const highRiskZones = zones.filter(z => z.risk_level === 'high' && z.auto_notify_authorities);
-    if (highRiskZones.length > 0) {
-      await this.notifyAuthorities(alert, highRiskZones);
-    }
-    
-    console.log(`🚨 Geo-fence alert triggered for tourist ${touristName} in ${zones[0].name}`);
   }
 
   // Generate alert message based on zones
@@ -180,23 +344,6 @@ class GeoFencingService {
     }
   }
 
-  // Get active alerts for a tourist
-  getActiveAlerts(touristId) {
-    const alerts = [];
-    for (const [key, alert] of this.activeAlerts.entries()) {
-      if (alert.touristId === touristId) {
-        alerts.push(alert);
-      }
-    }
-    return alerts;
-  }
-
-  // Get alert history
-  getAlertHistory(limit = 100) {
-    return this.alertHistory
-      .sort((a, b) => b.timestamp - a.timestamp)
-      .slice(0, limit);
-  }
 
   // Clear old alerts (cleanup)
   clearOldAlerts(maxAgeMinutes = 30) {

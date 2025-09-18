@@ -727,7 +727,9 @@ const AdminDashboard = () => {
                             <div className="flex-1">
                               <div className="flex items-center gap-2 mb-1">
                                 <span className="text-sm font-medium text-gray-900">
-                                  {a.type.replaceAll('_', ' ').toUpperCase()}
+                                  {a.type === 'geofence_alert' ? '🚨 GEO FENCE ALERT' : 
+                                   a.type === 'sos_alert' ? '🆘 SOS ALERT' : 
+                                   a.type.replaceAll('_', ' ').toUpperCase()}
                                 </span>
                                 <span className={`text-xs px-2 py-1 rounded-full ${
                                   a.severity === 'high' ? 'bg-red-100 text-red-700' :

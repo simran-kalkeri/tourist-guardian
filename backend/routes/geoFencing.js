@@ -43,7 +43,7 @@ router.post('/check-location', async (req, res) => {
 router.get('/alerts/:touristId', async (req, res) => {
   try {
     const { touristId } = req.params;
-    const alerts = GeoFencingService.getActiveAlerts(touristId);
+    const alerts = await GeoFencingService.getActiveAlerts(parseInt(touristId));
 
     res.json({
       success: true,
@@ -62,8 +62,16 @@ router.get('/alerts/:touristId', async (req, res) => {
 // Route to get alert history
 router.get('/alert-history', async (req, res) => {
   try {
-    const { limit } = req.query;
-    const history = GeoFencingService.getAlertHistory(limit ? parseInt(limit) : 100);
+    const filters = {
+      limit: req.query.limit ? parseInt(req.query.limit) : 100,
+      touristId: req.query.touristId ? parseInt(req.query.touristId) : undefined,
+      zoneId: req.query.zoneId,
+      riskLevel: req.query.riskLevel,
+      eventType: req.query.eventType,
+      status: req.query.status
+    };
+    
+    const history = await GeoFencingService.getAlertHistory(filters);
 
     res.json({
       success: true,
@@ -72,6 +80,28 @@ router.get('/alert-history', async (req, res) => {
     });
   } catch (error) {
     console.error('Error getting alert history:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      details: error.message
+    });
+  }
+});
+
+// Route to get critical geofencing alerts (tourists currently in high-risk zones)
+router.get('/critical-alerts', async (req, res) => {
+  try {
+    // Get only active critical alerts from database (tourists currently in high-risk zones)
+    const criticalAlerts = await GeoFencingService.getActiveCriticalAlerts();
+    
+    console.log(`📊 Active critical alerts found: ${criticalAlerts.length}`);
+
+    res.json({
+      success: true,
+      alerts: criticalAlerts,
+      count: criticalAlerts.length
+    });
+  } catch (error) {
+    console.error('Error getting critical alerts:', error);
     res.status(500).json({
       error: 'Internal server error',
       details: error.message

@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react'
-import { MapContainer, TileLayer, Polygon, Circle, Popup, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, Polygon, Circle, Popup, Marker, useMap } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { MapPin, AlertTriangle, Shield, Info, Calendar, Eye, EyeOff } from 'lucide-react'
+import { MapPin, AlertTriangle, Shield, Info, Calendar, Eye, EyeOff, User, Navigation } from 'lucide-react'
 import { Badge } from './ui/badge'
 
 // Fix for default markers in react-leaflet
@@ -12,6 +12,34 @@ L.Icon.Default.mergeOptions({
   iconUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png",
   shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
 })
+
+// Create custom tourist marker icons
+const createTouristIcon = (sosActive = false, isInHighRiskZone = false) => {
+  const color = sosActive ? '#dc2626' : isInHighRiskZone ? '#f59e0b' : '#10b981'
+  return new L.DivIcon({
+    html: `
+      <div style="
+        background-color: ${color};
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        border: 3px solid white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        color: white;
+        font-weight: bold;
+      ">
+        ${sosActive ? '🆘' : '👤'}
+      </div>
+    `,
+    className: 'tourist-marker',
+    iconSize: [20, 20],
+    iconAnchor: [10, 10]
+  })
+}
 
 // Component to update map view when zones change (only on initial load)
 const MapUpdater = ({ zones, shouldAutoFit = true }) => {
@@ -73,6 +101,95 @@ const getZoneColor = (riskLevel) => {
 // Get zone opacity based on alert status
 const getZoneOpacity = (alertEnabled) => {
   return alertEnabled ? 0.3 : 0.15
+}
+
+// Tourist popup component
+const TouristPopup = ({ tourist, isInHighRiskZone, zones }) => {
+  const formatDate = (dateString) => {
+    if (!dateString) return 'N/A'
+    return new Date(dateString).toLocaleString()
+  }
+
+  return (
+    <div className="p-4 min-w-64 max-w-80">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div>
+          <h3 className="font-semibold text-gray-900 text-base">
+            {tourist.name || `Tourist #${tourist.blockchainId}`}
+          </h3>
+          <div className="mt-1 flex gap-1">
+            {tourist.sosActive && (
+              <Badge className="bg-red-100 text-red-800">
+                🆘 SOS ACTIVE
+              </Badge>
+            )}
+            {isInHighRiskZone && (
+              <Badge className="bg-orange-100 text-orange-800">
+                ⚠️ HIGH RISK ZONE
+              </Badge>
+            )}
+            {!tourist.sosActive && !isInHighRiskZone && (
+              <Badge className="bg-green-100 text-green-800">
+                ✅ SAFE
+              </Badge>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-2 mb-4">
+        <div className="flex items-center gap-2 text-sm">
+          <MapPin className="w-4 h-4 text-gray-400" />
+          <span className="text-gray-600">
+            {tourist.latitude?.toFixed(4)}, {tourist.longitude?.toFixed(4)}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 text-sm">
+          <User className="w-4 h-4 text-gray-400" />
+          <span className="text-gray-600">
+            ID: {tourist.blockchainId}
+          </span>
+        </div>
+
+        {tourist.emergencyContact && (
+          <div className="flex items-center gap-2 text-sm">
+            <AlertTriangle className="w-4 h-4 text-gray-400" />
+            <span className="text-gray-600">
+              Emergency: {tourist.emergencyContact}
+            </span>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 text-sm">
+          <Calendar className="w-4 h-4 text-gray-400" />
+          <span className="text-gray-600">
+            Last Update: {formatDate(tourist.updatedAt)}
+          </span>
+        </div>
+
+        {zones && zones.length > 0 && (
+          <div className="mt-3">
+            <div className="text-sm font-medium text-gray-700 mb-1">Current Zones:</div>
+            {zones.map((zone, index) => (
+              <div key={index} className="text-sm text-gray-600 ml-2">
+                • {zone.name} ({zone.risk_level})
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="pt-2 border-t border-gray-200">
+        <div className="flex items-center justify-between text-xs text-gray-500">
+          <span>Simulation: {tourist.simulationMode ? 'Yes' : 'No'}</span>
+          <span className={tourist.isActive ? 'text-green-600' : 'text-red-600'}>
+            {tourist.isActive ? 'Active' : 'Inactive'}
+          </span>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // Zone popup component
@@ -178,8 +295,9 @@ const ZonePopup = ({ zone }) => {
   )
 }
 
-const RiskZoneMap = ({ zones = [], loading = false, onZoneSelect = null, onRefresh = null }) => {
+const RiskZoneMap = ({ zones = [], tourists = [], loading = false, onZoneSelect = null, onRefresh = null }) => {
   const [showInactiveZones, setShowInactiveZones] = useState(true)
+  const [showTourists, setShowTourists] = useState(true)
   
   // Default center (Northeast India - Guwahati)
   const defaultCenter = [26.1445, 91.7362]
@@ -197,6 +315,43 @@ const RiskZoneMap = ({ zones = [], loading = false, onZoneSelect = null, onRefre
   const highRiskZones = displayZones.filter(zone => zone.risk_level === 'high')
   const moderateRiskZones = displayZones.filter(zone => zone.risk_level === 'moderate' || zone.risk_level === 'medium')
   const lowRiskZones = displayZones.filter(zone => zone.risk_level === 'low' || zone.risk_level === 'safe')
+
+  // Function to check if tourist is in a high-risk zone
+  const checkTouristInHighRiskZone = (tourist) => {
+    if (!tourist.latitude || !tourist.longitude) return { inZone: false, zones: [] }
+    
+    const touristZones = zones.filter(zone => {
+      if (zone.risk_level !== 'high' || !zone.alert_enabled) return false
+      
+      if (zone.latitude && zone.longitude && zone.radius) {
+        // Check circular zone
+        const distance = getDistanceFromLatLonInMeters(
+          tourist.latitude, tourist.longitude,
+          zone.latitude, zone.longitude
+        )
+        return distance <= zone.radius
+      }
+      
+      return false
+    })
+    
+    return { inZone: touristZones.length > 0, zones: touristZones }
+  }
+
+  // Helper function to calculate distance
+  const getDistanceFromLatLonInMeters = (lat1, lon1, lat2, lon2) => {
+    const R = 6371e3 // Earth's radius in meters
+    const φ1 = (lat1 * Math.PI) / 180
+    const φ2 = (lat2 * Math.PI) / 180
+    const Δφ = ((lat2 - lat1) * Math.PI) / 180
+    const Δλ = ((lon2 - lon1) * Math.PI) / 180
+
+    const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ / 2) * Math.sin(Δλ / 2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    return R * c
+  }
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -222,6 +377,12 @@ const RiskZoneMap = ({ zones = [], loading = false, onZoneSelect = null, onRefre
                 <div className="w-3 h-3 bg-green-600 rounded-full"></div>
                 <span className="text-gray-600">Low ({lowRiskZones.length})</span>
               </div>
+              {tourists.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <div className="w-3 h-3 bg-blue-600 rounded-full"></div>
+                  <span className="text-gray-600">Tourists ({tourists.length})</span>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
@@ -246,6 +407,19 @@ const RiskZoneMap = ({ zones = [], loading = false, onZoneSelect = null, onRefre
                 <EyeOff className="w-3 h-3 mr-1 inline" />
                 {showInactiveZones ? "Hide" : "Show"} Inactive
               </button>
+              {tourists.length > 0 && (
+                <button
+                  onClick={() => setShowTourists(!showTourists)}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                    showTourists 
+                      ? "bg-blue-100 text-blue-700" 
+                      : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                  }`}
+                >
+                  <User className="w-3 h-3 mr-1 inline" />
+                  {showTourists ? "Hide" : "Show"} Tourists
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -335,6 +509,30 @@ const RiskZoneMap = ({ zones = [], loading = false, onZoneSelect = null, onRefre
               }
               
               return null
+            })}
+
+            {/* Render tourists */}
+            {showTourists && tourists.map((tourist) => {
+              if (!tourist.latitude || !tourist.longitude) return null
+              
+              const riskCheck = checkTouristInHighRiskZone(tourist)
+              const icon = createTouristIcon(tourist.sosActive, riskCheck.inZone)
+              
+              return (
+                <Marker
+                  key={tourist.blockchainId}
+                  position={[tourist.latitude, tourist.longitude]}
+                  icon={icon}
+                >
+                  <Popup>
+                    <TouristPopup 
+                      tourist={tourist} 
+                      isInHighRiskZone={riskCheck.inZone}
+                      zones={riskCheck.zones}
+                    />
+                  </Popup>
+                </Marker>
+              )
             })}
           </MapContainer>
         )}

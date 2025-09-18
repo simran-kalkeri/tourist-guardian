@@ -5,16 +5,20 @@ import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
 import { Alert, AlertDescription } from '../components/ui/alert'
-import { RefreshCw, MapPin, AlertTriangle, Shield, Plus, Edit, Trash2, Eye, EyeOff } from 'lucide-react'
+import { RefreshCw, MapPin, AlertTriangle, Shield, Plus, Edit, Trash2, Eye, EyeOff, Wifi, WifiOff } from 'lucide-react'
 import RiskZoneMap from '../components/RiskZoneMap'
 
 const AdminRiskZones = () => {
   const [zones, setZones] = useState([])
+  const [tourists, setTourists] = useState([])
   const [anomalies, setAnomalies] = useState([])
+  const [criticalAlerts, setCriticalAlerts] = useState([])
   const [stats, setStats] = useState({ total: 0, active: 0, byType: [], bySeverity: [] })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('all')
+  const [wsConnected, setWsConnected] = useState(false)
+  const [ws, setWs] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [selectedZone, setSelectedZone] = useState(null)
@@ -94,23 +98,127 @@ const AdminRiskZones = () => {
     }
   }
 
+  const fetchTourists = async () => {
+    try {
+      // Try multiple token storage methods
+      let token = localStorage.getItem('token') || 
+                 localStorage.getItem('authToken') || 
+                 sessionStorage.getItem('token') || 
+                 sessionStorage.getItem('authToken')
+      
+      if (!token) {
+        console.warn('No authentication token found. Trying without token...')
+        // Try public endpoint first
+        try {
+          const response = await fetch(`${API_BASE}/api/public/tourist-locations`)
+          if (response.ok) {
+            const data = await response.json()
+            const tourists = (data.tourists || []).map(tourist => ({
+              ...tourist,
+              blockchainId: tourist.id,
+              latitude: tourist.latitude,
+              longitude: tourist.longitude,
+              isActive: true
+            }))
+            setTourists(tourists)
+            console.log('Fetched tourists from public endpoint:', tourists.length)
+            return
+          }
+        } catch (publicError) {
+          console.log('Public endpoint also failed, need authentication')
+        }
+        
+        setTourists([]) // Set empty array if no token and no public access
+        return
+      }
+      
+      const response = await fetch(`${API_BASE}/api/tourists`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch tourists')
+      }
+      
+      const data = await response.json()
+      setTourists(data.tourists || [])
+      console.log('Fetched tourists:', data.tourists?.length || 0)
+    } catch (err) {
+      console.error('Error fetching tourists:', err)
+      setTourists([]) // Set empty array on error
+    }
+  }
+
   const fetchAnomalies = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/anomalies`)
-      if (!response.ok) throw new Error('Failed to fetch anomalies')
+      let token = localStorage.getItem('token') || 
+                 localStorage.getItem('authToken') || 
+                 sessionStorage.getItem('token') || 
+                 sessionStorage.getItem('authToken')
+      
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : {}
+      
+      const response = await fetch(`${API_BASE}/api/anomalies`, { headers })
+      if (!response.ok) {
+        if (response.status === 401) {
+          console.warn('Anomalies require authentication, skipping...')
+          setAnomalies([])
+          return
+        }
+        throw new Error('Failed to fetch anomalies')
+      }
       
       const data = await response.json()
       setAnomalies(data.anomalies || [])
     } catch (err) {
       console.error('Error fetching anomalies:', err)
+      setAnomalies([]) // Set empty array on error
+    }
+  }
+
+  const fetchCriticalAlerts = async () => {
+    console.log('🔍 Fetching critical alerts from:', `${API_BASE}/api/geofencing/critical-alerts`)
+    try {
+      const response = await fetch(`${API_BASE}/api/geofencing/critical-alerts`)
+      console.log('📡 Critical alerts response status:', response.status, response.statusText)
+      
+      if (!response.ok) {
+        console.warn('⚠️ Critical alerts endpoint failed:', response.status, response.statusText)
+        setCriticalAlerts([])
+        return
+      }
+      
+      const data = await response.json()
+      console.log('✅ Critical alerts response data:', data)
+      console.log('📊 Setting critical alerts array:', data.alerts)
+      
+      setCriticalAlerts(data.alerts || [])
+      console.log('✅ Critical alerts state updated. Length:', data.alerts?.length || 0)
+      
+      // Extra debug - log the actual alert objects
+      if (data.alerts && data.alerts.length > 0) {
+        console.log('🚨 First alert details:', data.alerts[0])
+      }
+    } catch (err) {
+      console.error('❌ Error fetching critical alerts:', err)
+      setCriticalAlerts([]) // Set empty array on error
     }
   }
 
   const fetchStats = async () => {
     try {
+      let token = localStorage.getItem('token') || 
+                 localStorage.getItem('authToken') || 
+                 sessionStorage.getItem('token') || 
+                 sessionStorage.getItem('authToken')
+      
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : {}
+      
       const [zonesResponse, anomaliesResponse] = await Promise.all([
-        fetch(`${API_BASE}/api/geofencing/statistics`),
-        fetch(`${API_BASE}/api/anomalies/stats`)
+        fetch(`${API_BASE}/api/geofencing/statistics`, { headers }),
+        fetch(`${API_BASE}/api/anomalies/stats`, { headers })
       ])
       
       if (zonesResponse.ok) {
@@ -441,22 +549,94 @@ const AdminRiskZones = () => {
   // Refresh function that can be called from child components
   const refreshZones = async () => {
     await fetchZones()
+    await fetchTourists()
+    await fetchCriticalAlerts()
     await fetchStats()
   }
+
+  // Debug effect to monitor critical alerts state changes
+  useEffect(() => {
+    console.log('🔄 Critical alerts state changed:', criticalAlerts.length, 'alerts')
+    if (criticalAlerts.length > 0) {
+      console.log('🚨 Current critical alerts:', criticalAlerts)
+    }
+  }, [criticalAlerts])
 
   useEffect(() => {
     const loadData = async () => {
       setLoading(true)
-      await Promise.all([fetchZones(), fetchAnomalies(), fetchStats()])
+      console.log('🚀 Initial data loading started...')
+      await Promise.all([fetchZones(), fetchTourists(), fetchAnomalies(), fetchCriticalAlerts(), fetchStats()])
+      console.log('✅ Initial data loading completed')
       setLoading(false)
     }
     
     loadData()
+    
+    // Set up WebSocket connection for real-time updates
+    const wsUrl = `ws://localhost:5000/ws`
+    const websocket = new WebSocket(wsUrl)
+    
+    websocket.onopen = () => {
+      console.log('WebSocket connected to risk zones page')
+      setWsConnected(true)
+      setWs(websocket)
+    }
+    
+    websocket.onclose = () => {
+      console.log('WebSocket disconnected from risk zones page')
+      setWsConnected(false)
+      setWs(null)
+    }
+    
+    websocket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        
+        // Handle location updates
+        if (data.type === 'location_update') {
+          setTourists(prevTourists => {
+            return prevTourists.map(tourist => 
+              tourist.blockchainId === data.touristId 
+                ? { 
+                    ...tourist, 
+                    latitude: data.latitude, 
+                    longitude: data.longitude,
+                    updatedAt: data.timestamp
+                  }
+                : tourist
+            )
+          })
+        }
+        
+        // Handle geofence alerts
+        if (data.type === 'geofence_alert') {
+          console.log('🚨 Geofence alert received on risk zones page:', data)
+          // Refresh critical alerts when a new geofence alert is received
+          console.log('🔄 Refreshing critical alerts due to new geofence alert...')
+          fetchCriticalAlerts()
+        }
+      } catch (error) {
+        console.error('Error parsing WebSocket message:', error)
+      }
+    }
+    
+    websocket.onerror = (error) => {
+      console.error('WebSocket error:', error)
+      setWsConnected(false)
+    }
+    
     const interval = setInterval(() => {
       // Refresh without showing loading state for background updates
-      Promise.all([fetchZones(), fetchAnomalies(), fetchStats()])
+      Promise.all([fetchZones(), fetchTourists(), fetchAnomalies(), fetchCriticalAlerts(), fetchStats()])
     }, 30000) // Poll every 30 seconds
-    return () => clearInterval(interval)
+    
+    return () => {
+      clearInterval(interval)
+      if (websocket.readyState === WebSocket.OPEN) {
+        websocket.close()
+      }
+    }
   }, [])
 
   if (loading) {
@@ -486,10 +666,18 @@ const AdminRiskZones = () => {
             <Plus className="w-4 h-4 mr-2" />
             Add Zone
           </Button>
-          <Button onClick={() => { refreshZones(); fetchAnomalies(); }} disabled={loading}>
-            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            <div className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${
+              wsConnected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+            }`}>
+              {wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+              {wsConnected ? 'Live' : 'Offline'}
+            </div>
+            <Button onClick={() => { refreshZones(); fetchAnomalies(); }} disabled={loading}>
+              <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+              Refresh
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -545,13 +733,16 @@ const AdminRiskZones = () => {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Critical Alerts</CardTitle>
+            <CardTitle className="text-sm font-medium">Critical Geofence Alerts</CardTitle>
             <AlertTriangle className="h-4 w-4 text-red-600" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-red-600">
-              {anomalies.filter(a => a.severity === 'critical').length}
+              {criticalAlerts.length}
             </div>
+            <p className="text-xs text-muted-foreground">
+              High-risk zone entries
+            </p>
           </CardContent>
         </Card>
       </div>
@@ -559,10 +750,66 @@ const AdminRiskZones = () => {
       {/* Risk Zones Map */}
       <RiskZoneMap 
         zones={zones}
+        tourists={tourists}
         loading={loading}
         onZoneSelect={setSelectedZone}
         onRefresh={refreshZones}
       />
+
+      {/* Critical Geofencing Alerts */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center justify-between">
+            <div className="flex items-center">
+              <AlertTriangle className="w-5 h-5 mr-2 text-red-600" />
+              Critical Geofencing Alerts
+            </div>
+            <div className="text-sm text-gray-500">
+              {criticalAlerts.length} alert{criticalAlerts.length !== 1 ? 's' : ''} loaded
+            </div>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {criticalAlerts.length === 0 ? (
+            <div className="text-center py-6 text-gray-500">
+              <AlertTriangle className="w-12 h-12 mx-auto mb-2 text-gray-300" />
+              <p>No critical geofencing alerts at this time</p>
+              <p className="text-xs text-gray-400 mt-1">Alerts will appear here when tourists enter high-risk zones</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {criticalAlerts.slice(0, 10).map((alert, index) => (
+                <div key={`${alert.touristId}-${alert.timestamp}-${index}`} className="flex items-center justify-between p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200">
+                  <div className="flex items-center space-x-3">
+                    <div className="w-10 h-10 bg-red-100 dark:bg-red-900/40 rounded-full flex items-center justify-center">
+                      <AlertTriangle className="w-5 h-5 text-red-600" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-red-900 dark:text-red-100">
+                        🚨 {alert.touristName || `Tourist #${alert.touristId}`}
+                      </p>
+                      <p className="text-sm text-red-700 dark:text-red-300">
+                        {alert.description || alert.message}
+                      </p>
+                      <p className="text-xs text-red-600 dark:text-red-400">
+                        Zone: {alert.zones?.[0]?.name || 'Unknown'} • Risk: {alert.zones?.[0]?.risk_level || alert.alertLevel}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm text-red-600 dark:text-red-400">
+                      {formatDate(alert.timestamp)}
+                    </p>
+                    <p className="text-xs text-red-500">
+                      {alert.latitude?.toFixed(4)}, {alert.longitude?.toFixed(4)}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Recent Anomalies */}
       {recentAnomalies.length > 0 && (
