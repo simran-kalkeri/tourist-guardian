@@ -22,7 +22,7 @@ class BlockchainService {
       }
 
       // Connect to Ganache
-      this.provider = new ethers.JsonRpcProvider("http://127.0.0.1:8545")
+      this.provider = new ethers.providers.JsonRpcProvider("http://127.0.0.1:8545")
 
       // Initialize admin wallet - default to Ganache account[0] from your list
       const adminPrivateKey = process.env.ADMIN_PRIVATE_KEY || "0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d"
@@ -31,7 +31,7 @@ class BlockchainService {
       // Verify wallet has funds
       const balance = await this.adminWallet.provider.getBalance(this.adminWallet.address);
       console.log("Admin wallet address:", this.adminWallet.address)
-      console.log("Admin wallet balance:", ethers.formatEther(balance), "ETH")
+      console.log("Admin wallet balance:", ethers.utils.formatEther(balance), "ETH")
       
       if (balance === 0n) {
         throw new Error("Admin wallet has no funds. Please ensure Ganache is running with the correct account.");
@@ -67,7 +67,7 @@ class BlockchainService {
         emergencyContact,
         {
           gasLimit: 500000,
-          gasPrice: ethers.parseUnits("20", "gwei"),
+          gasPrice: ethers.utils.parseUnits("20", "gwei"),
         }
       )
       const receipt = await tx.wait()

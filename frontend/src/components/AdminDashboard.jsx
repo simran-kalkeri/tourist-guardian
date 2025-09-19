@@ -398,15 +398,49 @@ const AdminDashboard = () => {
     }
     
     const handleGeofenceAlert = (data) => {
+      const zoneName = data.zones?.map(z => z.name).join(', ') || 'Unknown zone'
+      const touristName = data.tourist?.name || `Tourist #${data.touristId}`
+      const highRiskZones = data.zones?.filter(z => z.risk_level === 'high') || []
+      
       const geofenceAlert = {
         type: 'geofence_alert',
         touristId: data.touristId,
-        message: `Tourist entered risk zone: ${data.zones?.map(z => z.name).join(', ') || 'Unknown zone'}`,
+        message: `${touristName} entered ${highRiskZones.length > 0 ? 'high-risk' : 'risk'} zone: ${zoneName}`,
         severity: data.alertRequired ? 'high' : 'warn',
         timestamp: data.timestamp || new Date().toISOString(),
-        handled: false
+        handled: false,
+        tourist: data.tourist,
+        zones: data.zones
       }
       setAlerts(prevAlerts => [geofenceAlert, ...prevAlerts])
+      
+      // Show notification for high-risk zones
+      if (data.alertRequired && highRiskZones.length > 0) {
+        // Create a custom toast notification for high-risk zones
+        const notification = document.createElement('div');
+        notification.className = 'fixed top-4 right-4 bg-orange-600 text-white px-6 py-4 rounded-lg shadow-lg z-50 flex items-center gap-3 animate-pulse';
+        notification.innerHTML = `
+          <div class="w-6 h-6 bg-white rounded-full flex items-center justify-center">
+            <span class="text-orange-600 text-sm font-bold">⚠</span>
+          </div>
+          <div>
+            <div class="font-bold">🚨 High-Risk Zone Alert</div>
+            <div class="text-sm">${touristName} entered ${zoneName}</div>
+          </div>
+        `;
+        document.body.appendChild(notification);
+        
+        // Auto-remove after 6 seconds
+        setTimeout(() => {
+          if (notification.parentNode) {
+            notification.remove();
+          }
+        }, 6000);
+        
+        console.log('🚨 High-risk geofence alert:', geofenceAlert);
+      } else {
+        console.log('📍 Geofence alert:', geofenceAlert);
+      }
     }
     
     const handleAnomalyAlert = (data) => {

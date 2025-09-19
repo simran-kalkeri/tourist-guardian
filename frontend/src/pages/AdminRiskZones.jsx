@@ -191,16 +191,21 @@ const AdminRiskZones = () => {
       }
       
       const data = await response.json()
-      console.log('✅ Critical alerts response data:', data)
-      console.log('📊 Setting critical alerts array:', data.alerts)
+
+      // 🚨 Filter: only keep alerts for currently active tourists
+      const activeTouristIds = new Set(tourists.map(t => t.blockchainId || t.id))
+      const validAlerts = (data.alerts || []).filter(a => activeTouristIds.has(a.touristId))
+
+      //console.log('✅ Critical alerts response data:', data)
+      //console.log('📊 Setting critical alerts array:', data.alerts)
       
-      setCriticalAlerts(data.alerts || [])
-      console.log('✅ Critical alerts state updated. Length:', data.alerts?.length || 0)
+      setCriticalAlerts(validAlerts)
+      console.log('✅ Critical alerts state updated. Length:', validAlerts.length)
       
       // Extra debug - log the actual alert objects
-      if (data.alerts && data.alerts.length > 0) {
-        console.log('🚨 First alert details:', data.alerts[0])
-      }
+      //if (data.alerts && data.alerts.length > 0) {
+        //console.log('🚨 First alert details:', data.alerts[0])
+      //}
     } catch (err) {
       console.error('❌ Error fetching critical alerts:', err)
       setCriticalAlerts([]) // Set empty array on error

@@ -339,7 +339,7 @@ const Tourist = mongoose.model("Tourist", touristSchema)
 
 // MongoDB availability check function
 function isMongoConnected() {
-  return mongoConnected && mongoose.connection.readyState === 1;
+  return mongoose.connection.readyState === 1;
 }
 
 // Ensure MongoDB indexes are correct (drop obsolete tokenId index if present)
@@ -601,21 +601,26 @@ function clampToNE(lat, lng) {
 app.post("/api/tourists/:id/location", async (req, res) => {
   try {
     const { id } = req.params
-    const { latitude, longitude } = req.body
+    const { latitude, longitude, forceGeofenceTest } = req.body
 
     if (latitude === undefined || longitude === undefined) {
       return res.status(400).json({ error: "Latitude and longitude are required" })
     }
 
     // Check if tourist is in simulation mode and not device tracked - ignore device updates
+    // UNLESS forceGeofenceTest is true (for testing geofence functionality)
     const existing = await Tourist.findOne({ blockchainId: Number(id), isActive: true })
-    if (existing && existing.simulationMode && !existing.deviceTracked) {
+    if (existing && existing.simulationMode && !existing.deviceTracked && !forceGeofenceTest) {
       return res.json({ 
         success: true, 
         ignored: true, 
         reason: 'simulation_mode',
         message: 'Device location ignored - tourist is in simulation mode'
       })
+    }
+    
+    if (forceGeofenceTest) {
+      console.log(`🧪 Force geofence test enabled for tourist ${id}`);
     }
 
     // Update on blockchain using service
@@ -673,8 +678,40 @@ app.post("/api/tourists/:id/location", async (req, res) => {
         tourist.name || 'Unknown Tourist'
       )
       
-      if (geofenceResult.isInZone) {
+      if (geofenceResult.isInZone && geofenceResult.enteredZones > 0) {
         console.log(`🚨 Tourist ${id} entered risk zone:`, geofenceResult.zones)
+        
+        // Create geofence alert for Recent Alerts section
+        const timestamp = new Date().toISOString()
+        const highRiskZones = geofenceResult.zones.filter(zone => zone.risk_level === 'high')
+        const zoneName = geofenceResult.zones.map(z => z.name).join(', ')
+        
+        const geofenceAlert = {
+          type: 'geofence_alert',
+          touristId: Number(id),
+          message: `${tourist.name} entered ${highRiskZones.length > 0 ? 'high-risk' : 'risk'} zone: ${zoneName}`,
+          severity: geofenceResult.alert_required ? 'high' : 'warn',
+          timestamp: timestamp,
+          handled: false,
+          tourist: {
+            name: tourist.name,
+            id: Number(id),
+            latitude: tourist.displayLatitude,
+            longitude: tourist.displayLongitude
+          },
+          zones: geofenceResult.zones
+        }
+        
+        // Ensure tourist is still active before adding alert
+        const isActiveDoc = await Tourist.exists({ blockchainId: Number(id), isActive: true })
+        if (isActiveDoc) {
+          alerts.push(geofenceAlert)
+          // broadcast...
+        } else {
+          console.log(`Skipping geofence alert for inactive/missing tourist ${id}`)
+        }
+        console.log(`🔔 Added geofence alert to alerts array. Total alerts: ${alerts.length}`);
+        console.log(`📍 Geofence Alert details:`, JSON.stringify(geofenceAlert, null, 2));
         
         // Broadcast geofence alert
         broadcastToClients({
@@ -683,7 +720,7 @@ app.post("/api/tourists/:id/location", async (req, res) => {
           tourist: tourist,
           zones: geofenceResult.zones,
           alertRequired: geofenceResult.alert_required,
-          timestamp: new Date().toISOString()
+          timestamp: timestamp
         })
       }
     } catch (geoError) {
@@ -951,9 +988,41 @@ app.get("/api/tourists/:id/recent-ticks", (req, res) => {
   res.json({ success: true, ticks: recentTicks.get(id) || [] })
 })
 
-app.get("/api/alerts", (req, res) => {
-  res.json({ success: true, alerts: alerts.slice(-100) })
-})
+// Return latest alerts but filter out those whose tourist is no longer active
+app.get("/api/alerts", async (req, res) => {
+  try {
+    // shallow copy of last 200 alerts
+    const recent = alerts.slice(-200).reverse(); // newest first
+
+    // Build a set of touristIds present in recent alerts
+    const touristIds = [...new Set(recent.map(a => a.touristId).filter(Boolean))];
+
+    // Fetch active status for those tourists in one DB query
+    let activeMap = {};
+    if (touristIds.length > 0) {
+      const docs = await Tourist.find({ blockchainId: { $in: touristIds } }, { blockchainId: 1, isActive: 1 }).lean();
+      docs.forEach(d => { activeMap[d.blockchainId] = !!d.isActive; });
+    }
+
+    // Filter: keep alerts that have no touristId (system alerts) OR tourist is active
+    const filtered = recent.filter(a => {
+      if (!a.touristId) return true;
+      return activeMap[a.touristId] === true;
+    });
+
+    // Optionally purge stale alerts referencing inactive tourists from memory (to stop accumulation)
+    // Keep alerts that pass filter
+    const filteredReversed = filtered.reverse(); // back to chronological order
+    // Overwrite alerts with kept set + older other alerts (if you want to keep history)
+    // For simplicity, replace in-memory array with the filtered newest 200
+    alerts.splice(0, alerts.length, ...filteredReversed.slice(-200));
+
+    res.json({ success: true, alerts: filteredReversed.slice(-100) });
+  } catch (err) {
+    console.error("Failed to fetch alerts:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // Tourist detail with recent ticks
 app.get("/api/tourists/:id/details", async (req, res) => {
@@ -1383,6 +1452,13 @@ setInterval(async () => {
         // Mark as inactive in MongoDB
         await Tourist.findByIdAndUpdate(tourist._id, { isActive: false })
         console.log(`Cleaned up expired tourist: ${tourist.name} (ID: ${tourist.blockchainId})`)
+
+        // Remove in-memory alerts for this tourist to avoid showing stale alerts
+        for (let i = alerts.length - 1; i >= 0; i--) {
+          if (alerts[i].touristId === tourist.blockchainId) {
+            alerts.splice(i, 1);
+          }
+        }
       } catch (error) {
         console.error(`Failed to cleanup tourist ${tourist.blockchainId}:`, error)
       }
@@ -1528,24 +1604,38 @@ process.on("SIGINT", () => {
 
 // Initialize and start server
 async function startServer() {
-  // Initialize services first (doesn't require MongoDB)
-  await initServices()
-  
-  // Only run MongoDB operations if connection is available
-  if (isMongoConnected()) {
-    // Make sure indexes are correct before starting
-    await ensureTouristIndexes()
-    await seedPoliceStationsIfEmpty()
-    await seedSampleZonesIfEmpty()
-  } else {
-    console.log("⚠️  Skipping MongoDB-dependent initialization (connection not available)")
-  }
+  try {
+    // 1. Connect to MongoDB first
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 30000,
+      socketTimeoutMS: 0,
+      connectTimeoutMS: 30000,
+      maxPoolSize: 10,
+      minPoolSize: 2,
+      maxIdleTimeMS: 30000,
+      retryWrites: true,
+      retryReads: true,
+      heartbeatFrequencyMS: 10000,
+    });
+    console.log("✅ Connected to MongoDB Atlas successfully");
 
-  // Bind on all interfaces to allow LAN access from phones on the same network
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`)
-    console.log(`WebSocket server running on ws://0.0.0.0:${PORT}/ws`)
-  })
+    // 2. Ensure Mongo indexes + seed data
+    //await ensureTouristIndexes();
+    //await seedPoliceStationsIfEmpty();
+    //await seedSampleZonesIfEmpty();
+
+    // 3. Initialize blockchain / IoT services AFTER DB is ready
+    await initServices();
+
+    // 4. Start server
+    server.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://0.0.0.0:${PORT}`);
+      console.log(`WebSocket server running on ws://0.0.0.0:${PORT}/ws`);
+    });
+  } catch (err) {
+    console.error("❌ Error starting server:", err);
+    process.exit(1);
+  }
 }
 
 startServer()
