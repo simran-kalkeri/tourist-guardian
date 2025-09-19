@@ -27,12 +27,13 @@ class WebSocketService {
       this.socket = new WebSocket(wsUrl)
       
       this.socket.onopen = () => {
-        console.log('WebSocket connected')
-        this.reconnectAttempts = 0
+        console.log('WebSocket connected successfully to:', wsUrl); // Debug        this.reconnectAttempts = 0
+        this.reconnectAttempts = 0;
         this.emit('connected')
       }
 
       this.socket.onmessage = (event) => {
+        console.log('WebSocket message received:', event.data); // Debug
         try {
           const data = JSON.parse(event.data)
           this.emit('message', data)

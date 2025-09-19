@@ -167,6 +167,18 @@ class GeoFencingService {
       // Add to memory cache
       this.alertHistory.push(broadcastAlert);
       
+      // Broadcast to WebSocket clients
+      const broadcastToClients = require('../server').broadcastToClients;
+      broadcastToClients({
+        type: 'geofence_alert',
+        touristId,
+        tourist: { blockchainId: touristId, name: touristName, latitude, longitude },
+        zones: [zone],
+        alertRequired: zone.risk_level === 'high',
+        timestamp: currentTime.toISOString(),
+        source: 'real_time'
+      });
+      
       // Send notifications
       await this.sendNotifications(broadcastAlert);
       

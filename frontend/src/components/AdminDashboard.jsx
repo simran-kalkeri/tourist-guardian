@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import React, { useState, useEffect, useCallback, useRef } from "react"
 import {
   Users,
   MapPin,
@@ -39,8 +39,12 @@ import AdminTxQueue from "../pages/AdminTxQueue"
 import AdminRiskZones from "../pages/AdminRiskZones"
 import { useLanguage } from "../contexts/LanguageContext"
 import websocketService from "../services/websocketService"
+import { Alert, AlertTitle, AlertDescription } from "./ui/alert";
+
+// ✅ Create WebSocket client (connects once when file loads)
 
 const AdminDashboard = () => {
+  const socket = useRef(null);
   const { t } = useLanguage()
   const [tourists, setTourists] = useState([])
   const [filteredTourists, setFilteredTourists] = useState([])
@@ -62,6 +66,50 @@ const AdminDashboard = () => {
   })
 
   const apiBase = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000'
+
+  const getAlertVariant = (severityOrType) => {
+  console.log('getAlertVariant input:', severityOrType);
+  const severityMap = {
+    critical: 'destructive',
+    high: 'destructive',
+    warn: 'warning',
+    warning: 'warning',
+    info: 'info',
+    geofence_alert: 'warning',
+    anomaly_alert: 'warning',
+    sos_alert: 'destructive'
+  };
+  return severityMap[severityOrType] || 'default';
+};
+
+  const handleWebSocketMessage = useCallback((data) => {
+    console.log('Received WebSocket message:', data);
+    if (data.type === 'anomaly_alert') {
+      setAlerts(prev => [...prev, data.alert].slice(-100));
+    } else if (data.type === 'geofence_alert') {
+      const normalized = {
+        touristId: data.touristId,
+        type: 'geofence_alert',
+        severity: data.zones[0]?.risk_level || 'medium',
+        message: data.zones[0]?.alert_message || 'Geofence breach',
+        timestamp: data.timestamp
+      };
+      setAlerts(prev => [...prev, normalized].slice(-100));
+    } else if (data.type === 'sos_alert') {
+      setTourists(prev =>
+        prev.map(t =>
+          t.blockchainId === data.touristId ? { ...t, sosActive: data.sosActive } : t
+        )
+      );
+      setAlerts(prev => [...prev, {
+        touristId: data.touristId,
+        type: 'sos_alert',
+        severity: 'critical',
+        message: 'SOS activated',
+        timestamp: data.timestamp
+      }].slice(-100));
+    }
+  }, []);
 
   const fetchTourists = useCallback(async () => {
     try {
@@ -174,6 +222,26 @@ const AdminDashboard = () => {
     fetchAlerts()
     fetchEfirs()
   }, [])
+
+  useEffect(() => {
+    socket.current = new WebSocket("ws://localhost:5000/ws");
+
+    socket.current.onopen = () => console.log("✅ WebSocket connected");
+    socket.current.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleWebSocketMessage(data); // reuse callback
+      } catch (err) {
+        console.error("Error parsing WS message:", err);
+      }
+    };
+    socket.current.onclose = () => console.log("WebSocket closed");
+    socket.current.onerror = (err) => console.error("WebSocket error:", err);
+
+    return () => {
+      if (socket.current) socket.current.close();
+    };
+  }, [handleWebSocketMessage]);
 
   // Auto-refresh every 5 seconds
   useEffect(() => {
@@ -557,9 +625,33 @@ const AdminDashboard = () => {
               <button
                 onClick={() => setActiveTab("map")}
                 className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
-                  activeTab === "map"
-                    ? "border-emerald-500 text-emerald-600"
-                    : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+                  activeTab === "overview" && (
+                    <>
+                      <h2 className="text-2xl font-semibold mb-6">{t("overview")}</h2>
+                      <div className="bg-white shadow rounded-lg p-6">
+                        <h3 className="text-lg font-semibold mb-4">{t("recent_alerts")}</h3>
+                        {console.log('Rendering alerts:', alerts)} {/* Debug */}
+                        {alerts.length === 0 ? (
+                          <p className="text-gray-500">{t("no_alerts")}</p>
+                        ) : (
+                          <div className="space-y-4">
+                            {alerts.map((alert, index) => (
+                              <Alert key={index} variant={getAlertVariant(alert.severity || alert.type)}>
+                                <AlertTriangle className="h-4 w-4" />
+                                <AlertTitle>{alert.type?.replace("_", " ").toUpperCase()}</AlertTitle>
+                                <AlertDescription>
+                                  <p>{alert.message || "No description available"}</p>
+                                  <p className="text-xs text-gray-500">
+                                    Tourist ID: {alert.touristId || "Unknown"} | {new Date(alert.timestamp).toLocaleString()}
+                                  </p>
+                                </AlertDescription>
+                              </Alert>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
                 }`}
               >
                 <div className="flex items-center gap-2">

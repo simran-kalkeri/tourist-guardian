@@ -9,6 +9,7 @@ const http = require("http")
 require("dotenv").config()
 const EFIR = require("./models/EFIR")
 const PoliceStation = require("./models/PoliceStation")
+const GeofenceAlert = require('./models/GeofenceAlert'); // Add this import
 
 // Wallet Pool Schema
 const walletPoolSchema = new mongoose.Schema({
@@ -70,6 +71,7 @@ wss.on('connection', (ws) => {
 
 // Function to broadcast data to all connected clients
 const broadcastToClients = (data) => {
+  console.log('Broadcasting to clients:', data); // Debug log
   const message = JSON.stringify(data)
   connectedClients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
@@ -715,13 +717,26 @@ app.post("/api/tourists/:id/location", async (req, res) => {
         
         // Broadcast geofence alert
         broadcastToClients({
-          type: 'geofence_alert',
-          touristId: Number(id),
-          tourist: tourist,
+          type: "geofence_alert",
+          severity: "warning",
+          message: `Tourist ${tourist.name} entered a high-risk zone`,
+          touristId: tourist.blockchainId,
           zones: geofenceResult.zones,
-          alertRequired: geofenceResult.alert_required,
-          timestamp: timestamp
+          timestamp: new Date().toISOString(),
+          source: "zone_entry"
         })
+
+        // Example: inside zone exit handler
+        if (resolvedAlert) {
+          broadcastToClients({
+            type: "geofence_alert_resolved",
+            severity: "info",
+            message: `Tourist ${tourist.name} left the zone, alert resolved`,
+            touristId: tourist.blockchainId,
+            timestamp: new Date().toISOString(),
+            source: "zone_exit"
+          })
+        }
       }
     } catch (geoError) {
       console.error('Geofencing check error:', geoError)
@@ -989,38 +1004,44 @@ app.get("/api/tourists/:id/recent-ticks", (req, res) => {
 })
 
 // Return latest alerts but filter out those whose tourist is no longer active
-app.get("/api/alerts", async (req, res) => {
+app.get('/api/alerts', authenticateJWT, async (req, res) => {
   try {
-    // shallow copy of last 200 alerts
-    const recent = alerts.slice(-200).reverse(); // newest first
-
-    // Build a set of touristIds present in recent alerts
-    const touristIds = [...new Set(recent.map(a => a.touristId).filter(Boolean))];
-
-    // Fetch active status for those tourists in one DB query
-    let activeMap = {};
-    if (touristIds.length > 0) {
-      const docs = await Tourist.find({ blockchainId: { $in: touristIds } }, { blockchainId: 1, isActive: 1 }).lean();
-      docs.forEach(d => { activeMap[d.blockchainId] = !!d.isActive; });
-    }
-
-    // Filter: keep alerts that have no touristId (system alerts) OR tourist is active
-    const filtered = recent.filter(a => {
-      if (!a.touristId) return true;
-      return activeMap[a.touristId] === true;
-    });
-
-    // Optionally purge stale alerts referencing inactive tourists from memory (to stop accumulation)
-    // Keep alerts that pass filter
-    const filteredReversed = filtered.reverse(); // back to chronological order
-    // Overwrite alerts with kept set + older other alerts (if you want to keep history)
-    // For simplicity, replace in-memory array with the filtered newest 200
-    alerts.splice(0, alerts.length, ...filteredReversed.slice(-200));
-
-    res.json({ success: true, alerts: filteredReversed.slice(-100) });
-  } catch (err) {
-    console.error("Failed to fetch alerts:", err);
-    res.status(500).json({ success: false, error: err.message });
+    const { limit = 50 } = req.query;
+    // Anomalies
+    const dbAnomalies = await AnomalyDetection.find().sort({ createdAt: -1 }).limit(parseInt(limit)).lean();
+    const mappedAnomalies = dbAnomalies.map(a => ({
+      touristId: a.touristId,
+      type: a.anomalyType,
+      severity: a.severity,
+      message: a.description,
+      timestamp: a.createdAt.toISOString()
+    }));
+    // Geofence
+    const geofenceAlerts = await GeofenceAlert.find({ status: 'active' }).sort({ entryTime: -1 }).limit(parseInt(limit)).lean();
+    const mappedGeofence = geofenceAlerts.map(a => ({
+      touristId: a.touristId,
+      type: 'geofence_alert',
+      severity: a.severity,
+      message: a.message,
+      timestamp: a.entryTime.toISOString()
+    }));
+    // SOS
+    const sosTourists = await Tourist.find({ sosActive: true }).limit(parseInt(limit)).lean();
+    const mappedSOS = sosTourists.map(t => ({
+      touristId: t.blockchainId,
+      type: 'sos_alert',
+      severity: 'critical',
+      message: `SOS triggered by ${t.name}`,
+      timestamp: t.updatedAt.toISOString()
+    }));
+    // Combine and filter
+    const allAlerts = [...alerts, ...mappedAnomalies, ...mappedGeofence, ...mappedSOS]
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      .slice(0, parseInt(limit));
+    res.json({ success: true, alerts: allAlerts });
+  } catch (error) {
+    console.error('Failed to fetch alerts:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -1387,6 +1408,17 @@ function getAreaFromCoordinates(lat, lng) {
   return "Outskirts"
 }
 
+// GET /api/geofencing/alerts/:touristId
+app.get('/api/geofencing/alerts/:touristId', async (req, res) => {
+  const touristId = parseInt(req.params.touristId);
+  try {
+    const alerts = await GeoFencingService.getActiveAlerts(touristId);
+    res.json({ success: true, data: alerts });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ML Service proxy routes
 app.get("/api/ml/health", async (req, res) => {
   try {
@@ -1575,7 +1607,9 @@ setInterval(async () => {
             zones: geofenceResult.zones,
             alertRequired: geofenceResult.alert_required,
             timestamp: new Date().toISOString(),
-            source: 'periodic_check'
+            source: 'periodic_check',
+            severity: 'warning',
+            message: `Tourist ${tourist.name} entered high-risk zone ${geofenceResult.zones.map(z => z.name).join(", ")}`
           })
         }
       } catch (geoError) {
