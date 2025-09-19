@@ -167,88 +167,12 @@ const AdminDashboard = () => {
     setStats({ total, active, sosAlerts, areas: {} })
   }
 
-  // Initial data fetch
+  // Initial data fetch only
   useEffect(() => {
     fetchTourists()
     fetchAnalytics()
     fetchAlerts()
     fetchEfirs()
-    
-    // Connect WebSocket for real-time updates
-    websocketService.connect()
-    
-    // Listen for real-time updates
-    websocketService.on('location_update', (data) => {
-      setTourists(prevTourists => 
-        prevTourists.map(tourist => 
-          tourist.blockchainId === data.touristId 
-            ? { ...tourist, latitude: data.latitude, longitude: data.longitude, 
-                displayLatitude: data.displayLatitude, displayLongitude: data.displayLongitude,
-                sosActive: data.tourist?.sosActive || tourist.sosActive }
-            : tourist
-        )
-      )
-      setLastUpdate(new Date())
-    })
-    
-    websocketService.on('sos_alert', (data) => {
-      setTourists(prevTourists => 
-        prevTourists.map(tourist => 
-          tourist.blockchainId === data.touristId 
-            ? { ...tourist, sosActive: true }
-            : tourist
-        )
-      )
-      
-      // Add SOS alert to alerts list
-      const sosAlert = {
-        type: 'sos_alert',
-        touristId: data.touristId,
-        message: `SOS alert triggered by ${data.tourist?.name || `Tourist #${data.touristId}`}`,
-        severity: 'high',
-        timestamp: data.timestamp || new Date().toISOString(),
-        handled: false
-      }
-      setAlerts(prevAlerts => [sosAlert, ...prevAlerts])
-      setLastUpdate(new Date())
-    })
-    
-    // Listen for geofencing alerts
-    websocketService.on('geofence_alert', (data) => {
-      const geofenceAlert = {
-        type: 'geofence_alert',
-        touristId: data.touristId,
-        message: `Tourist entered risk zone: ${data.zones?.map(z => z.name).join(', ') || 'Unknown zone'}`,
-        severity: data.alertRequired ? 'high' : 'warn',
-        timestamp: data.timestamp || new Date().toISOString(),
-        handled: false
-      }
-      setAlerts(prevAlerts => [geofenceAlert, ...prevAlerts])
-    })
-    
-    // Listen for anomaly alerts
-    websocketService.on('anomaly_alert', (data) => {
-      const anomalyAlert = {
-        type: 'anomaly_alert',
-        touristId: data.alert?.touristId,
-        message: data.alert?.message || 'Anomaly detected',
-        severity: data.alert?.severity || 'warn',
-        timestamp: data.alert?.timestamp || new Date().toISOString(),
-        handled: false
-      }
-      setAlerts(prevAlerts => [anomalyAlert, ...prevAlerts])
-    })
-    
-    // Listen for E-FIR creation
-    websocketService.on('efir_created', (data) => {
-      if (data.efir) {
-        setEfirs(prevEfirs => [data.efir, ...prevEfirs])
-      }
-    })
-    
-    return () => {
-      websocketService.disconnect()
-    }
   }, [])
 
   // Auto-refresh every 5 seconds
@@ -432,16 +356,70 @@ const AdminDashboard = () => {
         setTourists(prev => prev.map(tourist => 
           tourist.blockchainId === data.touristId ? data.tourist : tourist
         ))
-        // Show notification
+        
+        // Create SOS alert for Recent Alerts section
+        const sosAlert = {
+          type: 'sos_alert',
+          touristId: data.touristId,
+          message: `SOS alert triggered by ${data.tourist?.name || `Tourist #${data.touristId}`}`,
+          severity: 'high',
+          timestamp: data.timestamp || new Date().toISOString(),
+          handled: false,
+          tourist: data.tourist
+        }
+        setAlerts(prevAlerts => [sosAlert, ...prevAlerts])
+        
+        // Show single elegant notification
         if (data.tourist) {
-          alert(`SOS Alert: ${data.tourist.name} (ID: ${data.touristId})`)
+          // Create a custom toast notification
+          const notification = document.createElement('div');
+          notification.className = 'fixed top-4 right-4 bg-red-600 text-white px-6 py-4 rounded-lg shadow-lg z-50 flex items-center gap-3 animate-pulse';
+          notification.innerHTML = `
+            <div class="w-6 h-6 bg-white rounded-full flex items-center justify-center">
+              <span class="text-red-600 text-sm font-bold">!</span>
+            </div>
+            <div>
+              <div class="font-bold">🆘 SOS Alert</div>
+              <div class="text-sm">${data.tourist.name} (ID: ${data.touristId})</div>
+            </div>
+          `;
+          document.body.appendChild(notification);
+          
+          // Auto-remove after 5 seconds
+          setTimeout(() => {
+            if (notification.parentNode) {
+              notification.remove();
+            }
+          }, 5000);
+          
+          console.log('🆘 SOS Alert received:', sosAlert);
         }
       }
     }
     
+    const handleGeofenceAlert = (data) => {
+      const geofenceAlert = {
+        type: 'geofence_alert',
+        touristId: data.touristId,
+        message: `Tourist entered risk zone: ${data.zones?.map(z => z.name).join(', ') || 'Unknown zone'}`,
+        severity: data.alertRequired ? 'high' : 'warn',
+        timestamp: data.timestamp || new Date().toISOString(),
+        handled: false
+      }
+      setAlerts(prevAlerts => [geofenceAlert, ...prevAlerts])
+    }
+    
     const handleAnomalyAlert = (data) => {
       if (data.type === 'anomaly_alert') {
-        setAlerts(prev => [data.alert, ...prev])
+        const anomalyAlert = {
+          type: 'anomaly_alert',
+          touristId: data.alert?.touristId,
+          message: data.alert?.message || 'Anomaly detected',
+          severity: data.alert?.severity || 'warn',
+          timestamp: data.alert?.timestamp || new Date().toISOString(),
+          handled: false
+        }
+        setAlerts(prev => [anomalyAlert, ...prev])
         // Show notification for high severity alerts
         if (data.alert.severity === 'high') {
           alert(`High Priority Alert: ${data.alert.message}`)
@@ -449,9 +427,17 @@ const AdminDashboard = () => {
       }
     }
     
+    const handleEfirCreated = (data) => {
+      if (data.efir) {
+        setEfirs(prevEfirs => [data.efir, ...prevEfirs])
+      }
+    }
+    
     websocketService.on('location_update', handleLocationUpdate)
     websocketService.on('sos_alert', handleSOSAlert)
+    websocketService.on('geofence_alert', handleGeofenceAlert)
     websocketService.on('anomaly_alert', handleAnomalyAlert)
+    websocketService.on('efir_created', handleEfirCreated)
     
     const interval = setInterval(() => {
       fetchTourists()
@@ -464,7 +450,9 @@ const AdminDashboard = () => {
       clearInterval(interval)
       websocketService.off('location_update', handleLocationUpdate)
       websocketService.off('sos_alert', handleSOSAlert)
+      websocketService.off('geofence_alert', handleGeofenceAlert)
       websocketService.off('anomaly_alert', handleAnomalyAlert)
+      websocketService.off('efir_created', handleEfirCreated)
       websocketService.disconnect()
     }
   }, [fetchTourists, fetchAnalytics, fetchAlerts, fetchEfirs])

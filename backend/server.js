@@ -779,6 +779,26 @@ app.post("/api/tourists/:id/sos", auditSOS, async (req, res) => {
       console.log(`🚨 Enqueued SOS TX job ${txJobId} for tourist ${id}`)
     }
 
+    // Create SOS alert object
+    const sosAlert = {
+      touristId: Number(id),
+      type: 'sos_alert',
+      severity: 'high',
+      message: `SOS alert triggered by ${tourist.name} (ID: ${id})`,
+      timestamp: new Date().toISOString(),
+      tourist: {
+        name: tourist.name,
+        id: Number(id),
+        latitude: tourist.displayLatitude,
+        longitude: tourist.displayLongitude
+      }
+    }
+    
+    // Add to alerts array for analytics and recent alerts
+    alerts.push(sosAlert)
+    console.log(`🔔 Added SOS alert to alerts array. Total alerts: ${alerts.length}`);
+    console.log(`📝 SOS Alert details:`, JSON.stringify(sosAlert, null, 2));
+    
     // Broadcast SOS alert once, include display coords
     broadcastToClients({
       type: 'sos_alert',
@@ -786,8 +806,9 @@ app.post("/api/tourists/:id/sos", auditSOS, async (req, res) => {
       tourist,
       displayLatitude: tourist.displayLatitude,
       displayLongitude: tourist.displayLongitude,
-      timestamp: new Date().toISOString(),
-      severity: 'high'
+      timestamp: sosAlert.timestamp,
+      severity: 'high',
+      message: sosAlert.message
     })
 
     res.json({
@@ -1239,8 +1260,9 @@ app.get("/api/analytics", authenticateJWT, authorizeRole(['admin', 'police', 'to
       
       const dayAlerts = alerts.filter(alert => {
         const alertDate = new Date(alert.timestamp)
-        return alertDate >= date && alertDate < nextDay && 
-               (alert.type === 'sos_alert' || alert.type === 'sos')
+        const isSOS = alert.type === 'sos_alert' || alert.type === 'sos' || 
+                     (alert.type && alert.type.toLowerCase().includes('sos'))
+        return alertDate >= date && alertDate < nextDay && isSOS
       }).length
       
       sosAlertsOverTime.push({
