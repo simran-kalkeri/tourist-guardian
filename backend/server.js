@@ -115,6 +115,67 @@ app.get('/api/debug/simulation-stats', (req, res) => {
   }
 })
 
+// Face verification test endpoint
+app.get('/api/debug/test-face-verification', async (req, res) => {
+  const faceVerificationAPI = 'http://10.1.10.60:8000/verify-text'
+  try {
+    console.log('🔍 Testing face verification API connectivity:', faceVerificationAPI)
+    
+    // Test with empty POST request to see API response format
+    const response = await fetch(faceVerificationAPI, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ test: 'connection' }),
+      timeout: 10000
+    })
+    
+    const responseText = await response.text()
+    console.log('📡 Face verification API response:', responseText)
+    
+    res.json({ 
+      success: true, 
+      message: 'Face verification API is reachable and responding',
+      status: response.status,
+      statusText: response.statusText,
+      apiEndpoint: faceVerificationAPI,
+      apiResponse: responseText,
+      note: 'API expects ref_file and live_file fields for actual verification'
+    })
+  } catch (error) {
+    console.error('❌ Face verification API test failed:', error)
+    res.json({ 
+      success: false, 
+      message: 'Face verification API is not reachable',
+      error: error.message,
+      apiEndpoint: faceVerificationAPI
+    })
+  }
+})
+
+// Debug endpoint to understand face verification API response format
+app.get('/api/debug/face-verification-format', (req, res) => {
+  res.json({
+    apiEndpoint: 'http://10.1.10.60:8000/verify-text',
+    expectedMethod: 'POST',
+    expectedFormat: 'multipart/form-data',
+    expectedFields: {
+      ref_file: 'File - Reference image for comparison',
+      live_file: 'File - Live captured image to verify'
+    },
+    possibleResponses: {
+      success: 'HTTP 200 with verification result',
+      failure: 'HTTP 200 with verification failure',
+      error: 'HTTP 4xx/5xx with error details'
+    },
+    troubleshooting: {
+      jsonParseError: 'API returns non-JSON response (possibly image or text)',
+      solution: 'Handle response as text first, then parse if JSON'
+    }
+  })
+})
+
 // Debug endpoint to force reset all tourists to device mode
 app.post('/api/debug/reset-tourists-to-device', async (req, res) => {
   try {
@@ -350,6 +411,9 @@ const touristSchema = new mongoose.Schema({
   tripStart: { type: Date, required: true },
   tripEnd: { type: Date, required: true },
   emergencyContact: { type: String, required: true },
+  // Face verification fields
+  faceVerified: { type: Boolean, default: false },
+  faceVerificationTimestamp: { type: Date, default: null },
   // Itinerary of planned waypoints for simulation-driven tours
   itinerary: [
     {
@@ -443,10 +507,18 @@ async function ensureTouristIndexes() {
 // 1. Register Tourist
 app.post("/api/tourists/register", auditRegistration, async (req, res) => {
   try {
-    const { name, aadharOrPassport, tripStart, tripEnd, emergencyContact, itinerary } = req.body
+    const { name, aadharOrPassport, tripStart, tripEnd, emergencyContact, itinerary, faceVerified, verificationTimestamp } = req.body
 
     if (!name || !aadharOrPassport || !tripStart || !tripEnd || !emergencyContact) {
       return res.status(400).json({ error: "All fields are required" })
+    }
+    
+    // 🔥 Require face verification for new registrations
+    if (!faceVerified) {
+      return res.status(400).json({ 
+        error: "Face verification required",
+        message: "You must complete face verification before registering. Please verify your identity through the mobile app."
+      })
     }
 
     // Check for expired assignments and release wallets
@@ -531,6 +603,9 @@ app.post("/api/tourists/register", auditRegistration, async (req, res) => {
       tripEnd: new Date(tripEnd),
       emergencyContact,
       itinerary: resolvedItinerary,
+      // 🔥 Face verification data
+      faceVerified: true,
+      faceVerificationTimestamp: verificationTimestamp ? new Date(verificationTimestamp) : new Date(),
       simulationMode: false, // 🔥 CHANGED: Disable simulation for real tourists
       deviceTracked: false, // Will be set to true when mobile app sends location
       // Initialize display coords to actual location
