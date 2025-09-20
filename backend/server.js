@@ -115,6 +115,31 @@ app.get('/api/debug/simulation-stats', (req, res) => {
   }
 })
 
+// Debug endpoint to force reset all tourists to device mode
+app.post('/api/debug/reset-tourists-to-device', async (req, res) => {
+  try {
+    const result = await Tourist.updateMany(
+      { isActive: true },
+      {
+        $set: {
+          simulationMode: false,
+          locationSource: 'device',
+          deviceTracked: true,
+          lastDeviceFixAt: new Date()
+        }
+      }
+    )
+    
+    res.json({ 
+      success: true, 
+      message: `Updated ${result.modifiedCount} tourists to device mode`,
+      modifiedCount: result.modifiedCount
+    })
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
+
 // Authentication endpoints
 app.post('/api/auth/login', (req, res) => {
   try {
@@ -693,9 +718,9 @@ app.post("/api/tourists/:id/location", async (req, res) => {
       }
     }
 
-    // Enforce NE display policy
-    const inNE = latitude >= NE_BOUNDS.minLat && latitude <= NE_BOUNDS.maxLat && longitude >= NE_BOUNDS.minLng && longitude <= NE_BOUNDS.maxLng
-    const display = inNE ? { latitude, longitude } : clampToNE(latitude, longitude)
+    // 🔥 FIXED: Always use real coordinates for display, don't clamp to NE India
+    // This allows admin dashboard to see real GPS locations anywhere in the world
+    const display = { latitude, longitude }
 
     // Update in MongoDB
     const tourist = await Tourist.findOneAndUpdate(

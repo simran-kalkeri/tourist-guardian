@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { View, Text, Button, Alert, Switch } from 'react-native'
-import MapView, { Marker, Polygon } from 'react-native-maps'
+import MapView, { Marker, Polygon, Circle } from 'react-native-maps'
 import { WebView } from 'react-native-webview'
 import * as Location from 'expo-location'
 import { Platform } from 'react-native'
@@ -33,8 +33,59 @@ export default function MapScreen({ route }) {
   const [tracking, setTracking] = useState(true) // 🔥 Start tracking by default
   const [locationStatus, setLocationStatus] = useState('GPS Not Ready');
   const [locationAccuracy, setLocationAccuracy] = useState(null);
+  const [currentZones, setCurrentZones] = useState([]); // Zones user is currently in
+  const [geofenceAlerts, setGeofenceAlerts] = useState([]);
   const wsRef = useRef(null)
   const webviewRef = useRef(null)
+  
+  // 🔥 Handle geofence alert notifications
+  const handleGeofenceAlert = (alertData) => {
+    const { zones, tourist, alertRequired } = alertData
+    
+    if (!zones || zones.length === 0) return
+    
+    const highRiskZones = zones.filter(z => z.risk_level === 'high')
+    const isHighRisk = highRiskZones.length > 0
+    const zoneName = zones.map(z => z.name).join(', ')
+    
+    // Update current zones
+    setCurrentZones(zones)
+    
+    // Add alert to history
+    const newAlert = {
+      id: Date.now(),
+      timestamp: new Date(),
+      zones,
+      message: `Entered ${isHighRisk ? 'high-risk' : 'risk'} zone: ${zoneName}`,
+      severity: isHighRisk ? 'high' : 'medium',
+      isHighRisk
+    }
+    
+    setGeofenceAlerts(prev => [newAlert, ...prev.slice(0, 4)]) // Keep last 5 alerts
+    
+    // Show visual alert
+    Alert.alert(
+      isHighRisk ? '🚨 HIGH RISK ZONE ALERT!' : '⚠️ Risk Zone Alert',
+      `You have entered: ${zoneName}\n\n${isHighRisk ? 'This is a HIGH RISK area. Please exercise extreme caution and consider leaving immediately.' : 'Please be cautious in this area.'}`,
+      [
+        { text: 'Understood', style: 'default' },
+        { text: 'Get Safety Tips', onPress: () => showSafetyTips(zones) }
+      ],
+      { cancelable: false }
+    )
+    
+    console.log('🚨 Geofence alert processed:', newAlert)
+  }
+  
+  // Show safety tips for current zone
+  const showSafetyTips = (zones) => {
+    const tips = zones.map(z => z.recommendations || 'Stay alert and follow local guidelines').join('\n\n')
+    Alert.alert(
+      '🛡️ Safety Tips',
+      tips || 'Stay alert, avoid isolated areas, keep emergency contacts handy, and report any suspicious activity.',
+      [{ text: 'Got it', style: 'default' }]
+    )
+  }
 
   useEffect(() => {
     (async () => {
@@ -87,16 +138,59 @@ export default function MapScreen({ route }) {
         setCoords({ latitude: 20.5937, longitude: 78.9629 }) // India center
       }
       
-      // Load risk zones
+      // Load risk zones - using same endpoint as admin dashboard
+      console.log('🔍 Loading risk zones from:', `${API_BASE}/api/geofencing/zones`)
       try {
-        const response = await fetch(`${API_BASE}/api/zones`)
+        const response = await fetch(`${API_BASE}/api/geofencing/zones`)
+        console.log('📡 Zone API response status:', response.status, response.statusText)
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+        }
+        
         const data = await response.json()
-        if (data.success) {
-          setZones(data.zones)
-          console.log('✅ Loaded', data.zones.length, 'risk zones')
+        console.log('📦 Raw zones data received:', JSON.stringify(data, null, 2))
+        
+        if (data.success && data.data) {
+          const loadedZones = data.data || []
+          setZones(loadedZones)
+          console.log('✅ Successfully loaded', loadedZones.length, 'risk zones')
+          
+          // Log zone details for debugging
+          loadedZones.forEach((zone, idx) => {
+            console.log(`🏾 Zone ${idx + 1}:`, {
+              name: zone.name,
+              riskLevel: zone.risk_level,
+              hasCoordinates: !!(zone.coordinates && zone.coordinates.length > 0),
+              hasCircle: !!(zone.latitude && zone.longitude && zone.radius),
+              coordinates: zone.coordinates?.length || 0,
+              circle: zone.latitude ? `${zone.latitude}, ${zone.longitude} (${zone.radius}m)` : 'none'
+            })
+          })
+        } else {
+          console.warn('⚠️ Zones API returned no data or unsuccessful response:', data)
+          setZones([])
         }
       } catch (error) {
-        console.error('❌ Failed to load risk zones:', error)
+        console.error('❌ Failed to load risk zones:', error.message)
+        console.error('🗺️ Error details:', error)
+        
+        // Try fallback endpoint
+        console.log('🔄 Trying fallback endpoint: /api/zones')
+        try {
+          const fallbackResponse = await fetch(`${API_BASE}/api/zones`)
+          const fallbackData = await fallbackResponse.json()
+          if (fallbackData.success && fallbackData.zones) {
+            setZones(fallbackData.zones)
+            console.log('✅ Loaded', fallbackData.zones.length, 'zones from fallback endpoint')
+          } else {
+            console.warn('⚠️ Fallback endpoint also failed')
+            setZones([])
+          }
+        } catch (fallbackError) {
+          console.error('❌ Fallback endpoint also failed:', fallbackError.message)
+          setZones([])
+        }
       }
     })()
   }, [touristId])
@@ -107,8 +201,26 @@ export default function MapScreen({ route }) {
     
     // Connect WebSocket for real-time updates
     wsRef.current = new WebSocket(WS_URL)
-    wsRef.current.onopen = () => console.log('✅ WebSocket connected')
+    wsRef.current.onopen = () => {
+      console.log('✅ WebSocket connected')
+      setLocationStatus(prev => prev + ' (Connected)')
+    }
     wsRef.current.onerror = (error) => console.error('❌ WebSocket error:', error)
+    
+    // 🔥 Handle incoming WebSocket messages for geofence alerts
+    wsRef.current.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        console.log('📨 WebSocket message received:', data)
+        
+        if (data.type === 'geofence_alert' && data.touristId === Number(touristId)) {
+          console.log('🚨 Geofence alert for current tourist:', data)
+          handleGeofenceAlert(data)
+        }
+      } catch (error) {
+        console.error('❌ Error parsing WebSocket message:', error)
+      }
+    }
     
     // Start GPS tracking with higher accuracy and more frequent updates
     const sub = Location.watchPositionAsync({ 
@@ -230,11 +342,65 @@ export default function MapScreen({ route }) {
   return (
     <View style={{ flex: 1 }}>
       <View style={{ flex: 1 }}>
-        <MapView style={{ flex: 1 }} initialRegion={{ latitude: coords.latitude, longitude: coords.longitude, latitudeDelta: 2, longitudeDelta: 2 }}>
-          <Marker coordinate={coords} title={tourist.name} description={`ID: ${tourist.blockchainId}`} />
-          {zones.map((z, idx) => (
-            <Polygon key={idx} coordinates={z.coordinates.map(([lat, lng]) => ({ latitude: lat, longitude: lng }))} strokeColor={z.riskLevel==='high'?'#dc2626':z.riskLevel==='medium'?'#f59e0b':'#3b82f6'} fillColor={z.riskLevel==='high'?'rgba(220,38,38,0.2)':z.riskLevel==='medium'?'rgba(245,158,11,0.2)':'rgba(59,130,246,0.2)'} />
-          ))}
+        <MapView 
+          style={{ flex: 1 }} 
+          initialRegion={{ latitude: coords.latitude, longitude: coords.longitude, latitudeDelta: 2, longitudeDelta: 2 }}
+          showsUserLocation={false}
+          followsUserLocation={false}
+          showsMyLocationButton={false}
+        >
+          {/* Tourist marker with enhanced styling */}
+          <Marker 
+            coordinate={coords} 
+            title={tourist.name} 
+            description={`ID: ${tourist.blockchainId}${currentZones.length > 0 ? ` | In: ${currentZones.map(z => z.name).join(', ')}` : ''}`}
+            pinColor={currentZones.some(z => z.risk_level === 'high') ? 'red' : 'blue'}
+          />
+          
+          {/* Render geofence zones */}
+          {zones.map((zone, idx) => {
+            const riskLevel = zone.riskLevel || zone.risk_level || 'low'
+            const isHighRisk = riskLevel === 'high'
+            const isMediumRisk = riskLevel === 'medium' || riskLevel === 'moderate' 
+            
+            const strokeColor = isHighRisk ? '#dc2626' : isMediumRisk ? '#f59e0b' : '#10b981'
+            const fillColor = isHighRisk ? 'rgba(220,38,38,0.3)' : isMediumRisk ? 'rgba(245,158,11,0.3)' : 'rgba(16,185,129,0.2)'
+            
+            // Render polygon zones
+            if (zone.coordinates && zone.coordinates.length > 0) {
+              return (
+                <Polygon 
+                  key={`polygon-${idx}`}
+                  coordinates={zone.coordinates.map(([lat, lng]) => ({ latitude: lat, longitude: lng }))}
+                  strokeColor={strokeColor}
+                  fillColor={fillColor}
+                  strokeWidth={2}
+                  tappable={true}
+                  onPress={() => Alert.alert(
+                    `🏾 Zone: ${zone.name}`,
+                    `Risk Level: ${riskLevel.toUpperCase()}\n${zone.description || 'No description available'}`,
+                    [{ text: 'OK' }]
+                  )}
+                />
+              )
+            }
+            
+            // Render circular zones (if lat/lng and radius provided)
+            if (zone.latitude && zone.longitude && zone.radius) {
+              return (
+                <Circle 
+                  key={`circle-${idx}`}
+                  center={{ latitude: zone.latitude, longitude: zone.longitude }}
+                  radius={zone.radius}
+                  strokeColor={strokeColor}
+                  fillColor={fillColor}
+                  strokeWidth={2}
+                />
+              )
+            }
+            
+            return null
+          })}
         </MapView>
       </View>
       {/* Leaflet (WebView) for parity with admin map */}
@@ -252,9 +418,28 @@ export default function MapScreen({ route }) {
           <Text style={{ fontSize: 16, fontWeight: 'bold' }}>GPS Tracking</Text>
           <Switch value={tracking} onValueChange={setTracking} />
         </View>
-        <Text style={{ fontSize: 12, color: tracking ? '#10b981' : '#f59e0b', marginBottom: 8 }}>
+        <Text style={{ fontSize: 12, color: tracking ? '#10b981' : '#f59e0b', marginBottom: 4 }}>
           {locationStatus}
         </Text>
+        <Text style={{ fontSize: 11, color: '#6b7280', marginBottom: 8 }}>
+          🏾 Risk Zones: {zones.length} loaded
+        </Text>
+        
+        {/* Current zones display */}
+        {currentZones.length > 0 && (
+          <View style={{ marginBottom: 8 }}>
+            <Text style={{ fontSize: 12, fontWeight: 'bold', color: '#dc2626' }}>⚠️ Current Zones:</Text>
+            {currentZones.map((zone, idx) => (
+              <Text key={idx} style={{ 
+                fontSize: 11, 
+                color: zone.risk_level === 'high' ? '#dc2626' : zone.risk_level === 'medium' ? '#f59e0b' : '#10b981',
+                marginLeft: 8
+              }}>
+                • {zone.name} ({zone.risk_level?.toUpperCase()})
+              </Text>
+            ))}
+          </View>
+        )}
         <View style={{ flexDirection:'row', justifyContent:'space-between' }}>
           <Button title="Safety Score" onPress={requestSafetyScore} />
           <Button title="🆘 SOS" color="#dc2626" onPress={triggerSOS} />
