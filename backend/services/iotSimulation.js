@@ -5,13 +5,15 @@ class IoTSimulationService {
     this.activeSimulations = new Map()
     this.blockchainService = null
     this.Tourist = null
+    this.Alert = null
     this.isRunning = false
   }
 
-  async initialize(Tourist, blockchainService) {
+  async initialize(Tourist, blockchainService, Alert = null) {
     this.Tourist = Tourist
     this.blockchainService = blockchainService
-    console.log("IoT Simulation Service initialized")
+    this.Alert = Alert
+    console.log("IoT Simulation Service initialized with Alert model:", !!Alert)
   }
 
   // Generate random coordinates within a realistic range
@@ -156,14 +158,46 @@ class IoTSimulationService {
   // Trigger random SOS
   async triggerRandomSOS(touristId) {
     try {
-      // Update in MongoDB
-      await this.Tourist.findOneAndUpdate(
+      // Get tourist info for alert
+      const tourist = await this.Tourist.findOneAndUpdate(
         { blockchainId: touristId, isActive: true },
         {
           sosActive: true,
           updatedAt: new Date(),
         },
+        { new: true }
       )
+
+      if (!tourist) {
+        console.log(`Tourist ${touristId} not found for SOS trigger`)
+        return
+      }
+
+      // Create SOS alert for analytics
+      const sosAlert = {
+        touristId: touristId,
+        type: 'sos_alert',
+        severity: 'high',
+        message: `SOS alert triggered by simulation for ${tourist.name} (ID: ${touristId})`,
+        timestamp: new Date(),
+        tourist: {
+          name: tourist.name,
+          id: touristId,
+          latitude: tourist.displayLatitude || tourist.latitude,
+          longitude: tourist.displayLongitude || tourist.longitude
+        }
+      }
+
+      // Save SOS alert to database if Alert model is available
+      if (this.Alert) {
+        try {
+          const alertDoc = new this.Alert(sosAlert)
+          await alertDoc.save()
+          console.log(`💾 Saved simulation SOS alert to database: ${alertDoc._id}`);
+        } catch (dbError) {
+          console.error('Failed to save simulation SOS alert to database:', dbError)
+        }
+      }
 
       // Skip blockchain SOS updates to avoid errors
       // Blockchain integration can be enabled when contract is properly deployed

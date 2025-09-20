@@ -151,6 +151,26 @@ const alerts = [] // {touristId, type, severity, message, timestamp}
 const MONGODB_URI = process.env.MONGODB_URI ||
   "mongodb+srv://siteadmin:officer123@cluster0.l6busjy.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 
+// Alert Schema for persistent storage
+const alertSchema = new mongoose.Schema({
+  type: { type: String, required: true }, // 'sos_alert', 'geofence_alert', etc.
+  touristId: { type: Number, required: true },
+  severity: { type: String, enum: ['low', 'medium', 'high', 'critical'], default: 'medium' },
+  message: { type: String, required: true },
+  timestamp: { type: Date, default: Date.now },
+  handled: { type: Boolean, default: false },
+  tourist: {
+    name: String,
+    id: Number,
+    latitude: Number,
+    longitude: Number
+  },
+  zones: [mongoose.Schema.Types.Mixed], // For geofence alerts
+  metadata: mongoose.Schema.Types.Mixed // Additional data
+})
+
+const Alert = mongoose.model("Alert", alertSchema)
+
 // Set mongoose options for better Atlas connectivity
 // Enable buffering to queue commands until connection is ready
 mongoose.set('bufferCommands', true);
@@ -248,7 +268,7 @@ async function initServices() {
 
     // Initialize IoT simulation service
     iotSimulation = new IoTSimulationService()
-    await iotSimulation.initialize(Tourist, blockchainService)
+    await iotSimulation.initialize(Tourist, blockchainService, Alert)
 
     // Start IoT simulations for existing tourists only after MongoDB is ready
     setTimeout(async () => {
@@ -851,6 +871,15 @@ app.post("/api/tourists/:id/sos", auditSOS, async (req, res) => {
     console.log(`🔔 Added SOS alert to alerts array. Total alerts: ${alerts.length}`);
     console.log(`📝 SOS Alert details:`, JSON.stringify(sosAlert, null, 2));
     
+    // Store SOS alert in database for persistent analytics
+    try {
+      const alertDoc = new Alert(sosAlert)
+      await alertDoc.save()
+      console.log(`💾 Saved SOS alert to database: ${alertDoc._id}`);
+    } catch (dbError) {
+      console.error('Failed to save SOS alert to database:', dbError)
+    }
+    
     // Broadcast SOS alert once, include display coords
     broadcastToClients({
       type: 'sos_alert',
@@ -1007,6 +1036,13 @@ app.get("/api/tourists/:id/recent-ticks", (req, res) => {
 app.get('/api/alerts', authenticateJWT, async (req, res) => {
   try {
     const { limit = 50 } = req.query;
+    
+    // Get alerts from our new persistent Alert collection
+    const dbAlerts = await Alert.find({})
+      .sort({ timestamp: -1 })
+      .limit(parseInt(limit))
+      .lean();
+    
     // Anomalies
     const dbAnomalies = await AnomalyDetection.find().sort({ createdAt: -1 }).limit(parseInt(limit)).lean();
     const mappedAnomalies = dbAnomalies.map(a => ({
@@ -1016,6 +1052,7 @@ app.get('/api/alerts', authenticateJWT, async (req, res) => {
       message: a.description,
       timestamp: a.createdAt.toISOString()
     }));
+    
     // Geofence
     const geofenceAlerts = await GeofenceAlert.find({ status: 'active' }).sort({ entryTime: -1 }).limit(parseInt(limit)).lean();
     const mappedGeofence = geofenceAlerts.map(a => ({
@@ -1025,19 +1062,30 @@ app.get('/api/alerts', authenticateJWT, async (req, res) => {
       message: a.message,
       timestamp: a.entryTime.toISOString()
     }));
-    // SOS
+    
+    // SOS - get current active SOS from tourists (for real-time status)
     const sosTourists = await Tourist.find({ sosActive: true }).limit(parseInt(limit)).lean();
     const mappedSOS = sosTourists.map(t => ({
       touristId: t.blockchainId,
       type: 'sos_alert',
       severity: 'critical',
-      message: `SOS triggered by ${t.name}`,
+      message: `SOS currently active for ${t.name}`,
       timestamp: t.updatedAt.toISOString()
     }));
-    // Combine and filter
-    const allAlerts = [...alerts, ...mappedAnomalies, ...mappedGeofence, ...mappedSOS]
+    
+    // Combine all alerts: persistent alerts from DB + other sources + in-memory alerts
+    const allAlerts = [...dbAlerts, ...alerts, ...mappedAnomalies, ...mappedGeofence, ...mappedSOS]
+      .filter((alert, index, self) => {
+        // Remove duplicates based on touristId, type, and approximate timestamp
+        const key = `${alert.touristId}-${alert.type}-${Math.floor(new Date(alert.timestamp).getTime() / 60000)}`
+        return index === self.findIndex(a => 
+          `${a.touristId}-${a.type}-${Math.floor(new Date(a.timestamp).getTime() / 60000)}` === key
+        )
+      })
       .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
       .slice(0, parseInt(limit));
+      
+    console.log(`📊 Fetched ${allAlerts.length} alerts (${dbAlerts.length} from DB, ${alerts.length} in-memory)`);
     res.json({ success: true, alerts: allAlerts });
   } catch (error) {
     console.error('Failed to fetch alerts:', error);
@@ -1284,6 +1332,7 @@ app.patch("/api/anomalies/:id/resolve", authenticateJWT, authorizeRole(['admin',
   }
 })
 
+
 // Get analytics data
 app.get("/api/analytics", authenticateJWT, authorizeRole(['admin', 'police', 'tourismDept']), async (req, res) => {
   try {
@@ -1339,25 +1388,47 @@ app.get("/api/analytics", authenticateJWT, authorizeRole(['admin', 'police', 'to
       })
     }
 
-    // Generate SOS alerts over time data (last 7 days)
+    // Generate SOS alerts over time data (last 48 hours in 2-hour intervals) - FROM DATABASE for persistence
     const sosAlertsOverTime = []
-    for (let day = 6; day >= 0; day--) {
-      const date = new Date()
-      date.setDate(date.getDate() - day)
-      date.setHours(0, 0, 0, 0)
-      const nextDay = new Date(date)
-      nextDay.setDate(nextDay.getDate() + 1)
+    const now = new Date()
+    
+    // Generate data for last 48 hours in 2-hour intervals (24 intervals)
+    for (let interval = 23; interval >= 0; interval--) {
+      const intervalStart = new Date(now.getTime() - (interval * 2 * 60 * 60 * 1000))
+      intervalStart.setMinutes(0, 0, 0) // Round to nearest hour
+      const intervalEnd = new Date(intervalStart.getTime() + (2 * 60 * 60 * 1000)) // Add 2 hours
       
-      const dayAlerts = alerts.filter(alert => {
-        const alertDate = new Date(alert.timestamp)
-        const isSOS = alert.type === 'sos_alert' || alert.type === 'sos' || 
-                     (alert.type && alert.type.toLowerCase().includes('sos'))
-        return alertDate >= date && alertDate < nextDay && isSOS
-      }).length
+      // Count SOS alerts from database for this 2-hour interval
+      let intervalAlerts = 0
+      try {
+        intervalAlerts = await Alert.countDocuments({
+          type: 'sos_alert',
+          timestamp: {
+            $gte: intervalStart,
+            $lt: intervalEnd
+          }
+        })
+      } catch (dbError) {
+        console.error('Error counting SOS alerts from database:', dbError)
+        // Fallback to in-memory count if database fails
+        intervalAlerts = alerts.filter(alert => {
+          const alertDate = new Date(alert.timestamp)
+          const isSOS = alert.type === 'sos_alert' || alert.type === 'sos' || 
+                       (alert.type && alert.type.toLowerCase().includes('sos'))
+          return alertDate >= intervalStart && alertDate < intervalEnd && isSOS
+        }).length
+      }
+      
+      // Format time as "HH:MM" for 2-hour intervals
+      const timeLabel = intervalStart.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: false 
+      })
       
       sosAlertsOverTime.push({
-        time: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        alerts: dayAlerts
+        time: timeLabel,
+        alerts: intervalAlerts
       })
     }
 

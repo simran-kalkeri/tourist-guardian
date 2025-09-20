@@ -740,7 +740,7 @@ const AdminDashboard = () => {
                     <XAxis dataKey="time" />
                     <YAxis />
                     <Tooltip />
-                    <Line type="monotone" dataKey="alerts" stroke="#dc2626" strokeWidth={2} />
+                    <Line type="monotone" dataKey="alerts" stroke="#2563eb" strokeWidth={2} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -819,7 +819,21 @@ const AdminDashboard = () => {
                       </p>
                     </div>
                   )}
-                  {alerts.filter(a => !a.handled).slice().reverse().map((a, idx) => {
+                  {alerts.filter(a => {
+                    // Don't show handled alerts
+                    if (a.handled) return false
+                    
+                    // For SOS alerts, only show if the tourist currently has active SOS
+                    if (a.type === 'sos_alert') {
+                      const touristWithActiveSOS = tourists.find(t => 
+                        t.blockchainId === a.touristId && t.sosActive === true
+                      )
+                      return !!touristWithActiveSOS
+                    }
+                    
+                    // Show all other alert types
+                    return true
+                  }).slice().reverse().map((a, idx) => {
                     const getAlertIcon = () => {
                       if (a.type.includes('sos')) return <AlertTriangle className="w-4 h-4 text-red-500" />
                       if (a.type.includes('geofence')) return <MapPin className="w-4 h-4 text-orange-500" />
