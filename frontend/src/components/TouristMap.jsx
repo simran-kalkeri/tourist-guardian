@@ -141,26 +141,45 @@ const GeofenceLayer = ({ tourists, alerts }) => {
 
     // Add geofence alerts
     alerts.forEach((alert) => {
-      if (alert.type === "geofence_breach" && alert.latitude && alert.longitude) {
-        const alertMarker = L.circleMarker([alert.latitude, alert.longitude], {
-          color: "#dc2626",
-          fillColor: "#dc2626",
-          fillOpacity: 0.3,
-          radius: 8,
-          weight: 3
-        })
+      if (alert.type === "geofence_alert") {
+        // Try to get location from alert data or tourist data
+        let latitude = alert.latitude || alert.tourist?.latitude
+        let longitude = alert.longitude || alert.tourist?.longitude
+        
+        // If no direct location, try to find the tourist
+        if (!latitude || !longitude) {
+          const tourist = tourists.find(t => t.blockchainId === alert.touristId)
+          if (tourist) {
+            latitude = tourist.displayLatitude || tourist.latitude
+            longitude = tourist.displayLongitude || tourist.longitude
+          }
+        }
+        
+        if (latitude && longitude) {
+          const alertMarker = L.circleMarker([latitude, longitude], {
+            color: "#dc2626",
+            fillColor: "#dc2626",
+            fillOpacity: 0.3,
+            radius: 10,
+            weight: 3
+          })
 
-        alertMarker.bindPopup(`
-          <div class="p-2">
-            <h4 class="font-semibold text-red-600">Geofence Alert</h4>
-            <p class="text-sm text-gray-600 mt-1">${alert.message}</p>
-            <p class="text-xs text-gray-500 mt-2">
-              Time: ${new Date(alert.timestamp).toLocaleString()}
-            </p>
-          </div>
-        `)
+          alertMarker.bindPopup(`
+            <div class="p-2">
+              <h4 class="font-semibold text-red-600">🚨 Geofence Alert</h4>
+              <p class="text-sm text-gray-600 mt-1">${alert.message}</p>
+              <p class="text-xs text-gray-500 mt-2">
+                Tourist: #${alert.touristId}<br>
+                Time: ${new Date(alert.timestamp).toLocaleString()}
+              </p>
+              <p class="text-xs text-orange-600 mt-1">
+                Severity: ${alert.severity || 'medium'}
+              </p>
+            </div>
+          `)
 
-        geofenceLayer.addLayer(alertMarker)
+          geofenceLayer.addLayer(alertMarker)
+        }
       }
     })
 
@@ -272,7 +291,7 @@ const TouristMap = ({ tourists, onResetSOS, alerts = [] }) => {
               </div>
               <div className="flex items-center gap-2">
                 <div className="w-3 h-3 bg-orange-500 rounded-full"></div>
-                <span className="text-gray-600">Geofence Alerts ({alerts.filter(a => a.type === 'geofence_breach').length})</span>
+                <span className="text-gray-600">Geofence Alerts ({alerts.filter(a => a.type === 'geofence_alert').length})</span>
               </div>
             </div>
 
@@ -359,7 +378,7 @@ const TouristMap = ({ tourists, onResetSOS, alerts = [] }) => {
           </div>
           <div>
             <p className="text-2xl font-bold text-orange-600">
-              {alerts.filter(a => a.type === 'geofence_breach').length}
+              {alerts.filter(a => a.type === 'geofence_alert').length}
             </p>
             <p className="text-sm text-gray-500">Geofence Alerts</p>
           </div>

@@ -152,6 +152,76 @@ router.delete('/alerts/cleanup', async (req, res) => {
   }
 });
 
+// Route to cleanup stale geofence alerts for inactive tourists (admin only)
+router.post('/alerts/cleanup-inactive', async (req, res) => {
+  try {
+    console.log('🧹 Starting cleanup of stale geofence alerts for inactive tourists...');
+    
+    const GeofenceAlert = require('../models/GeofenceAlert');
+    const Tourist = require('../models/Tourist') || require('../server').Tourist;
+    
+    // Get all active geofence alerts
+    const activeAlerts = await GeofenceAlert.find({
+      status: 'active',
+      exitTime: null
+    });
+    
+    console.log(`📊 Found ${activeAlerts.length} active geofence alerts`);
+    
+    if (activeAlerts.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No active alerts found',
+        cleaned: 0
+      });
+    }
+    
+    // Get all active tourist IDs
+    const activeTourists = await Tourist.find({ isActive: true }).select('blockchainId').lean();
+    const activeTouristIds = new Set(activeTourists.map(t => t.blockchainId));
+    
+    console.log(`👥 Found ${activeTouristIds.size} active tourists`);
+    
+    // Find stale alerts (alerts for inactive tourists)
+    const staleAlerts = activeAlerts.filter(alert => !activeTouristIds.has(alert.touristId));
+    
+    console.log(`🚫 Found ${staleAlerts.length} stale alerts for inactive tourists`);
+    
+    let cleanedCount = 0;
+    
+    // Resolve stale alerts
+    for (const alert of staleAlerts) {
+      try {
+        await alert.markAsExited({
+          latitude: alert.latitude,
+          longitude: alert.longitude
+        });
+        
+        console.log(`✅ Resolved stale alert ${alert._id} for inactive tourist ${alert.touristId} (${alert.touristName})`);
+        cleanedCount++;
+      } catch (resolveError) {
+        console.error(`Failed to resolve alert ${alert._id}:`, resolveError);
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: `Cleaned up ${cleanedCount} stale geofence alerts`,
+      totalActive: activeAlerts.length,
+      staleFound: staleAlerts.length,
+      cleaned: cleanedCount,
+      activeTourists: activeTouristIds.size
+    });
+    
+  } catch (error) {
+    console.error('❌ Error cleaning up stale alerts:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      details: error.message
+    });
+  }
+});
+
 // Route to get all zones (for admin dashboard)
 router.get('/zones', async (req, res) => {
   try {

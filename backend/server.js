@@ -629,9 +629,24 @@ app.post("/api/tourists/:id/location", async (req, res) => {
       return res.status(400).json({ error: "Latitude and longitude are required" })
     }
 
+    // Check if tourist exists and is active first
+    const existing = await Tourist.findOne({ blockchainId: Number(id) })
+    if (!existing) {
+      return res.status(404).json({ error: "Tourist not found" })
+    }
+    
+    if (!existing.isActive) {
+      console.log(`🚫 Ignoring location update for inactive tourist ${id}`);
+      return res.json({ 
+        success: true, 
+        ignored: true, 
+        reason: 'tourist_inactive',
+        message: 'Location update ignored - tourist is inactive'
+      })
+    }
+    
     // Check if tourist is in simulation mode and not device tracked - ignore device updates
     // UNLESS forceGeofenceTest is true (for testing geofence functionality)
-    const existing = await Tourist.findOne({ blockchainId: Number(id), isActive: true })
     if (existing && existing.simulationMode && !existing.deviceTracked && !forceGeofenceTest) {
       return res.json({ 
         success: true, 
@@ -715,36 +730,63 @@ app.post("/api/tourists/:id/location", async (req, res) => {
           severity: geofenceResult.alert_required ? 'high' : 'warn',
           timestamp: timestamp,
           handled: false,
+          // Add location data directly to alert for map display
+          latitude: tourist.displayLatitude,
+          longitude: tourist.displayLongitude,
           tourist: {
             name: tourist.name,
             id: Number(id),
             latitude: tourist.displayLatitude,
             longitude: tourist.displayLongitude
           },
-          zones: geofenceResult.zones
+          zones: geofenceResult.zones,
+          metadata: {
+            rawLatitude: latitude,
+            rawLongitude: longitude,
+            displayLatitude: tourist.displayLatitude,
+            displayLongitude: tourist.displayLongitude,
+            zoneName: zoneName,
+            highRiskZones: highRiskZones.length
+          }
         }
         
         // Ensure tourist is still active before adding alert
         const isActiveDoc = await Tourist.exists({ blockchainId: Number(id), isActive: true })
         if (isActiveDoc) {
           alerts.push(geofenceAlert)
-          // broadcast...
+          
+          // Store geofence alert in database for persistence
+          try {
+            const alertDoc = new Alert(geofenceAlert)
+            await alertDoc.save()
+            console.log(`💾 Saved geofence alert to database: ${alertDoc._id}`);
+          } catch (dbError) {
+            console.error('Failed to save geofence alert to database:', dbError)
+          }
+          
+          console.log(`🔔 Added geofence alert to alerts array. Total alerts: ${alerts.length}`);
+          console.log(`📍 Geofence Alert details:`, JSON.stringify(geofenceAlert, null, 2));
+          
+          // Broadcast geofence alert with complete data for real-time updates (only for active tourists)
+          broadcastToClients({
+            type: "geofence_alert",
+            touristId: Number(id),
+            alert: geofenceAlert,
+            latitude: tourist.displayLatitude,
+            longitude: tourist.displayLongitude,
+            zones: geofenceResult.zones,
+            timestamp: timestamp,
+            alertRequired: geofenceResult.alert_required,
+            tourist: {
+              name: tourist.name,
+              id: Number(id),
+              latitude: tourist.displayLatitude,
+              longitude: tourist.displayLongitude
+            }
+          })
         } else {
           console.log(`Skipping geofence alert for inactive/missing tourist ${id}`)
         }
-        console.log(`🔔 Added geofence alert to alerts array. Total alerts: ${alerts.length}`);
-        console.log(`📍 Geofence Alert details:`, JSON.stringify(geofenceAlert, null, 2));
-        
-        // Broadcast geofence alert
-        broadcastToClients({
-          type: "geofence_alert",
-          severity: "warning",
-          message: `Tourist ${tourist.name} entered a high-risk zone`,
-          touristId: tourist.blockchainId,
-          zones: geofenceResult.zones,
-          timestamp: new Date().toISOString(),
-          source: "zone_entry"
-        })
 
         // Example: inside zone exit handler
         if (resolvedAlert) {
@@ -1073,8 +1115,26 @@ app.get('/api/alerts', authenticateJWT, async (req, res) => {
       timestamp: t.updatedAt.toISOString()
     }));
     
+    // Get list of active tourists to filter alerts
+    const activeTourists = await Tourist.find({ isActive: true }).select('blockchainId sosActive').lean()
+    const activeTouristIds = new Set(activeTourists.map(t => t.blockchainId))
+    const sosActiveTouristIds = new Set(activeTourists.filter(t => t.sosActive).map(t => t.blockchainId))
+    
     // Combine all alerts: persistent alerts from DB + other sources + in-memory alerts
     const allAlerts = [...dbAlerts, ...alerts, ...mappedAnomalies, ...mappedGeofence, ...mappedSOS]
+      .filter(alert => {
+        // Only include alerts from active tourists
+        if (!activeTouristIds.has(alert.touristId)) {
+          return false
+        }
+        
+        // For SOS alerts, only show if tourist currently has active SOS
+        if (alert.type === 'sos_alert') {
+          return sosActiveTouristIds.has(alert.touristId)
+        }
+        
+        return true
+      })
       .filter((alert, index, self) => {
         // Remove duplicates based on touristId, type, and approximate timestamp
         const key = `${alert.touristId}-${alert.type}-${Math.floor(new Date(alert.timestamp).getTime() / 60000)}`
@@ -1555,6 +1615,31 @@ setInterval(async () => {
         // Mark as inactive in MongoDB
         await Tourist.findByIdAndUpdate(tourist._id, { isActive: false })
         console.log(`Cleaned up expired tourist: ${tourist.name} (ID: ${tourist.blockchainId})`)
+
+        // Resolve any active geofence alerts for this tourist
+        try {
+          const GeofenceAlert = require('./models/GeofenceAlert')
+          const activeGeofenceAlerts = await GeofenceAlert.find({
+            touristId: tourist.blockchainId,
+            status: 'active',
+            exitTime: null
+          })
+          
+          if (activeGeofenceAlerts.length > 0) {
+            console.log(`🧹 Resolving ${activeGeofenceAlerts.length} active geofence alert(s) for inactive tourist ${tourist.blockchainId}`)
+            
+            // Mark all active alerts as resolved
+            for (const alert of activeGeofenceAlerts) {
+              await alert.markAsExited({
+                latitude: tourist.latitude || 0,
+                longitude: tourist.longitude || 0
+              })
+              console.log(`✅ Resolved geofence alert ${alert._id} for inactive tourist`)
+            }
+          }
+        } catch (geofenceError) {
+          console.error(`Failed to clean up geofence alerts for tourist ${tourist.blockchainId}:`, geofenceError)
+        }
 
         // Remove in-memory alerts for this tourist to avoid showing stale alerts
         for (let i = alerts.length - 1; i >= 0; i--) {

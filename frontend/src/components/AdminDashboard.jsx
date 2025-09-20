@@ -477,6 +477,9 @@ const AdminDashboard = () => {
         severity: data.alertRequired ? 'high' : 'warn',
         timestamp: data.timestamp || new Date().toISOString(),
         handled: false,
+        // Include location data for map display
+        latitude: data.latitude || data.tourist?.latitude,
+        longitude: data.longitude || data.tourist?.longitude,
         tourist: data.tourist,
         zones: data.zones
       }
@@ -672,26 +675,30 @@ const AdminDashboard = () => {
                   {t('analytics')}
                 </div>
               </button>
+              {/* Hidden: Wallet Pool tab - keeping functionality but hiding from UI */}
               <button
                 onClick={() => setActiveTab("wallet-pool")}
-                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors hidden ${
                   activeTab === "wallet-pool"
                     ? "border-emerald-500 text-emerald-600"
                     : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
                 }`}
+                style={{ display: 'none' }}
               >
                 <div className="flex items-center gap-2">
                   <Shield className="w-4 h-4" />
                   Wallet Pool
                 </div>
               </button>
+              {/* Hidden: TX Queue tab - keeping functionality but hiding from UI */}
               <button
                 onClick={() => setActiveTab("tx-queue")}
-                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                className={`py-4 px-1 border-b-2 font-medium text-sm transition-colors hidden ${
                   activeTab === "tx-queue"
                     ? "border-emerald-500 text-emerald-600"
                     : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
                 }`}
+                style={{ display: 'none' }}
               >
                 <div className="flex items-center gap-2">
                   <Activity className="w-4 h-4" />
@@ -831,8 +838,19 @@ const AdminDashboard = () => {
                       return !!touristWithActiveSOS
                     }
                     
-                    // Show all other alert types
-                    return true
+                    // For geofence alerts, only show if the tourist is currently active
+                    if (a.type === 'geofence_alert') {
+                      const activeTourist = tourists.find(t => 
+                        t.blockchainId === a.touristId && t.isActive === true
+                      )
+                      return !!activeTourist
+                    }
+                    
+                    // For other alert types, check if tourist is active
+                    const activeTourist = tourists.find(t => 
+                      t.blockchainId === a.touristId && t.isActive === true
+                    )
+                    return !!activeTourist
                   }).slice().reverse().map((a, idx) => {
                     const getAlertIcon = () => {
                       if (a.type.includes('sos')) return <AlertTriangle className="w-4 h-4 text-red-500" />

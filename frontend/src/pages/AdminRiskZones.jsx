@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
@@ -100,6 +100,8 @@ const AdminRiskZones = () => {
 
   const fetchTourists = async () => {
     try {
+      console.log('🔍 Fetching tourists data...')
+      
       // Try multiple token storage methods
       let token = localStorage.getItem('token') || 
                  localStorage.getItem('authToken') || 
@@ -107,7 +109,7 @@ const AdminRiskZones = () => {
                  sessionStorage.getItem('authToken')
       
       if (!token) {
-        console.warn('No authentication token found. Trying without token...')
+        console.warn('⚠️ No authentication token found. Trying without token...')
         // Try public endpoint first
         try {
           const response = await fetch(`${API_BASE}/api/public/tourist-locations`)
@@ -120,14 +122,16 @@ const AdminRiskZones = () => {
               longitude: tourist.longitude,
               isActive: true
             }))
+            console.log('✅ Fetched tourists from public endpoint:', tourists.length, 'tourists')
+            console.log('📊 Tourist details:', tourists.map(t => ({ id: t.blockchainId, name: t.name, lat: t.latitude, lng: t.longitude })))
             setTourists(tourists)
-            console.log('Fetched tourists from public endpoint:', tourists.length)
             return
           }
         } catch (publicError) {
-          console.log('Public endpoint also failed, need authentication')
+          console.log('❌ Public endpoint also failed, need authentication:', publicError.message)
         }
         
+        console.log('🚫 No tourists available - setting empty array')
         setTourists([]) // Set empty array if no token and no public access
         return
       }
@@ -139,14 +143,16 @@ const AdminRiskZones = () => {
       })
       
       if (!response.ok) {
-        throw new Error('Failed to fetch tourists')
+        throw new Error(`Failed to fetch tourists: ${response.status} ${response.statusText}`)
       }
       
       const data = await response.json()
-      setTourists(data.tourists || [])
-      console.log('Fetched tourists:', data.tourists?.length || 0)
+      const tourists = data.tourists || []
+      console.log('✅ Fetched tourists from authenticated endpoint:', tourists.length, 'tourists')
+      console.log('📊 Tourist details:', tourists.map(t => ({ id: t.blockchainId, name: t.name, lat: t.latitude, lng: t.longitude, active: t.isActive })))
+      setTourists(tourists)
     } catch (err) {
-      console.error('Error fetching tourists:', err)
+      console.error('❌ Error fetching tourists:', err)
       setTourists([]) // Set empty array on error
     }
   }
@@ -191,21 +197,41 @@ const AdminRiskZones = () => {
       }
       
       const data = await response.json()
+      const rawAlerts = data.alerts || []
+      console.log('📥 Raw critical alerts received:', rawAlerts.length)
 
-      // 🚨 Filter: only keep alerts for currently active tourists
+      // Get current active tourist IDs - but don't filter if tourists haven't been loaded yet
       const activeTouristIds = new Set(tourists.map(t => t.blockchainId || t.id))
-      const validAlerts = (data.alerts || []).filter(a => activeTouristIds.has(a.touristId))
-
-      //console.log('✅ Critical alerts response data:', data)
-      //console.log('📊 Setting critical alerts array:', data.alerts)
+      console.log('👥 Current active tourist IDs:', Array.from(activeTouristIds))
+      
+      // Only filter by active tourists if we actually have tourist data loaded
+      let validAlerts
+      if (tourists.length > 0) {
+        validAlerts = rawAlerts.filter(a => {
+          const isValid = activeTouristIds.has(a.touristId)
+          if (!isValid) {
+            console.log(`🚫 Filtering out alert for tourist ${a.touristId} (not in active list)`)
+          }
+          return isValid
+        })
+        console.log('✅ Filtered critical alerts (active tourists only):', validAlerts.length)
+      } else {
+        // If no tourists loaded yet, keep all alerts to avoid premature filtering
+        validAlerts = rawAlerts
+        console.log('⏳ No tourists data yet - keeping all alerts temporarily')
+      }
       
       setCriticalAlerts(validAlerts)
       console.log('✅ Critical alerts state updated. Length:', validAlerts.length)
       
-      // Extra debug - log the actual alert objects
-      //if (data.alerts && data.alerts.length > 0) {
-        //console.log('🚨 First alert details:', data.alerts[0])
-      //}
+      if (validAlerts.length > 0) {
+        console.log('🚨 Alert details:', validAlerts.map(a => ({ 
+          touristId: a.touristId, 
+          touristName: a.touristName, 
+          timestamp: a.timestamp,
+          zones: a.zones?.map(z => z.name) 
+        })))
+      }
     } catch (err) {
       console.error('❌ Error fetching critical alerts:', err)
       setCriticalAlerts([]) // Set empty array on error
@@ -541,23 +567,26 @@ const AdminRiskZones = () => {
     return new Date(dateString).toLocaleString()
   }
 
-  const filteredZones = zones.filter(zone => {
-    const matchesFilter = filter === 'all' || zone.risk_level === filter
-    const matchesSearch = searchTerm === '' || 
-      zone.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      zone.description?.toLowerCase().includes(searchTerm.toLowerCase())
-    return matchesFilter && matchesSearch
-  })
+  const filteredZones = useMemo(() => {
+    return zones.filter(zone => {
+      const matchesFilter = filter === 'all' || zone.risk_level === filter
+      const matchesSearch = searchTerm === '' || 
+        zone.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        zone.description?.toLowerCase().includes(searchTerm.toLowerCase())
+      return matchesFilter && matchesSearch
+    })
+  }, [zones, filter, searchTerm])
 
   const recentAnomalies = anomalies.slice(0, 10)
 
   // Refresh function that can be called from child components
-  const refreshZones = async () => {
+  const refreshZones = useCallback(async () => {
+    console.log('🔄 Manual refresh triggered')
     await fetchZones()
     await fetchTourists()
     await fetchCriticalAlerts()
     await fetchStats()
-  }
+  }, [])
 
   // Debug effect to monitor critical alerts state changes
   useEffect(() => {
@@ -566,6 +595,19 @@ const AdminRiskZones = () => {
       console.log('🚨 Current critical alerts:', criticalAlerts)
     }
   }, [criticalAlerts])
+
+  // Debug effect to monitor tourist data state changes
+  useEffect(() => {
+    console.log('👥 Tourist data state changed:', tourists.length, 'tourists')
+    console.log('📋 Tourist summary:', tourists.map(t => ({
+      id: t.blockchainId || t.id,
+      name: t.name,
+      active: t.isActive,
+      hasCoords: !!(t.latitude && t.longitude),
+      coords: `${t.latitude?.toFixed(4)}, ${t.longitude?.toFixed(4)}`,
+      lastUpdate: t.updatedAt
+    })))
+  }, [tourists])
 
   useEffect(() => {
     const loadData = async () => {
@@ -597,20 +639,44 @@ const AdminRiskZones = () => {
     websocket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
+        console.log('📨 WebSocket message received:', data.type, data)
         
         // Handle location updates
         if (data.type === 'location_update') {
+          console.log(`📍 Location update for tourist ${data.touristId}:`, { 
+            lat: data.latitude, 
+            lng: data.longitude, 
+            displayLat: data.displayLatitude, 
+            displayLng: data.displayLongitude 
+          })
+          
           setTourists(prevTourists => {
-            return prevTourists.map(tourist => 
-              tourist.blockchainId === data.touristId 
-                ? { 
-                    ...tourist, 
-                    latitude: data.latitude, 
-                    longitude: data.longitude,
-                    updatedAt: data.timestamp
-                  }
-                : tourist
-            )
+            const updated = prevTourists.map(tourist => {
+              if (tourist.blockchainId === data.touristId) {
+                const updatedTourist = { 
+                  ...tourist, 
+                  latitude: data.displayLatitude || data.latitude, 
+                  longitude: data.displayLongitude || data.longitude,
+                  rawLatitude: data.latitude,
+                  rawLongitude: data.longitude,
+                  updatedAt: data.timestamp
+                }
+                console.log(`✅ Updated tourist ${data.touristId} location:`, {
+                  old: { lat: tourist.latitude, lng: tourist.longitude },
+                  new: { lat: updatedTourist.latitude, lng: updatedTourist.longitude }
+                })
+                return updatedTourist
+              }
+              return tourist
+            })
+            
+            // Check if tourist was found and updated
+            const foundTourist = updated.find(t => t.blockchainId === data.touristId)
+            if (!foundTourist) {
+              console.log(`⚠️ Tourist ${data.touristId} not found in current list - may need to refresh tourist data`)
+            }
+            
+            return updated
           })
         }
         
@@ -619,10 +685,13 @@ const AdminRiskZones = () => {
           console.log('🚨 Geofence alert received on risk zones page:', data)
           // Refresh critical alerts when a new geofence alert is received
           console.log('🔄 Refreshing critical alerts due to new geofence alert...')
-          fetchCriticalAlerts()
+          // Add a slight delay to ensure the alert is saved on the backend first
+          setTimeout(() => {
+            fetchCriticalAlerts()
+          }, 500)
         }
       } catch (error) {
-        console.error('Error parsing WebSocket message:', error)
+        console.error('❌ Error parsing WebSocket message:', error)
       }
     }
     
@@ -631,10 +700,18 @@ const AdminRiskZones = () => {
       setWsConnected(false)
     }
     
+    // Reduced polling frequency to avoid conflicts with WebSocket updates
     const interval = setInterval(() => {
+      console.log('🔄 Background refresh triggered (every 60s)')
       // Refresh without showing loading state for background updates
       Promise.all([fetchZones(), fetchTourists(), fetchAnomalies(), fetchCriticalAlerts(), fetchStats()])
-    }, 30000) // Poll every 30 seconds
+        .then(() => {
+          console.log('✅ Background refresh completed')
+        })
+        .catch(err => {
+          console.error('❌ Background refresh failed:', err)
+        })
+    }, 60000) // Poll every 60 seconds (reduced from 30s to minimize conflicts)
     
     return () => {
       clearInterval(interval)

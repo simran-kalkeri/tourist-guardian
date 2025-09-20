@@ -166,6 +166,35 @@ geofenceAlertSchema.statics.findActiveCriticalAlerts = function() {
   }).sort({ entryTime: -1 });
 };
 
+// More efficient method that joins with Tourist collection to only get alerts for active tourists
+geofenceAlertSchema.statics.findActiveCriticalAlertsForActiveTourists = function() {
+  return this.aggregate([
+    {
+      $match: {
+        status: 'active',
+        exitTime: null,
+        zoneRiskLevel: { $in: ['high', 'critical'] }
+      }
+    },
+    {
+      $lookup: {
+        from: 'tourists', // MongoDB collection name for Tourist model
+        localField: 'touristId',
+        foreignField: 'blockchainId',
+        as: 'tourist'
+      }
+    },
+    {
+      $match: {
+        'tourist.isActive': true
+      }
+    },
+    {
+      $sort: { entryTime: -1 }
+    }
+  ]);
+};
+
 geofenceAlertSchema.statics.findActiveAlertsInZone = function(zoneId) {
   return this.find({
     zoneId: zoneId,

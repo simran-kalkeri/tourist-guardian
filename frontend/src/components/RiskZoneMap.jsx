@@ -380,7 +380,14 @@ const RiskZoneMap = ({ zones = [], tourists = [], loading = false, onZoneSelect 
               {tourists.length > 0 && (
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 bg-blue-600 rounded-full"></div>
-                  <span className="text-gray-600">Tourists ({tourists.length})</span>
+                  <span className="text-gray-600">
+                    Tourists ({tourists.filter(t => 
+                      t.latitude != null && t.longitude != null && 
+                      typeof t.latitude === 'number' && typeof t.longitude === 'number' &&
+                      !isNaN(t.latitude) && !isNaN(t.longitude) &&
+                      t.latitude !== 0 && t.longitude !== 0
+                    ).length}/{tourists.length})
+                  </span>
                 </div>
               )}
             </div>
@@ -513,14 +520,39 @@ const RiskZoneMap = ({ zones = [], tourists = [], loading = false, onZoneSelect 
 
             {/* Render tourists */}
             {showTourists && tourists.map((tourist) => {
-              if (!tourist.latitude || !tourist.longitude) return null
+              // More robust coordinate validation - check for valid numeric values
+              const hasValidCoords = tourist.latitude != null && 
+                                   tourist.longitude != null && 
+                                   typeof tourist.latitude === 'number' && 
+                                   typeof tourist.longitude === 'number' &&
+                                   !isNaN(tourist.latitude) && 
+                                   !isNaN(tourist.longitude) &&
+                                   tourist.latitude !== 0 && 
+                                   tourist.longitude !== 0
+              
+              if (!hasValidCoords) {
+                console.log(`🚫 Tourist ${tourist.blockchainId || tourist.id} filtered out - invalid coordinates:`, {
+                  lat: tourist.latitude,
+                  lng: tourist.longitude,
+                  name: tourist.name
+                })
+                return null
+              }
               
               const riskCheck = checkTouristInHighRiskZone(tourist)
               const icon = createTouristIcon(tourist.sosActive, riskCheck.inZone)
               
+              console.log(`✅ Rendering tourist ${tourist.blockchainId || tourist.id} on map:`, {
+                name: tourist.name,
+                lat: tourist.latitude,
+                lng: tourist.longitude,
+                sos: tourist.sosActive,
+                inHighRisk: riskCheck.inZone
+              })
+              
               return (
                 <Marker
-                  key={tourist.blockchainId}
+                  key={tourist.blockchainId || tourist.id}
                   position={[tourist.latitude, tourist.longitude]}
                   icon={icon}
                 >

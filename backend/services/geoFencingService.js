@@ -270,13 +270,59 @@ class GeoFencingService {
     }
   }
 
-  // Get all currently active critical alerts (database-based)
+  // Get all currently active critical alerts (database-based) - only for active tourists
   async getActiveCriticalAlerts() {
     try {
-      const alerts = await GeofenceAlert.findActiveCriticalAlerts();
-      return alerts.map(alert => this.formatAlertForAPI(alert));
+      console.log('🔍 Fetching critical alerts for active tourists only...');
+      
+      // Try to use the more efficient aggregation method first
+      let alerts;
+      try {
+        alerts = await GeofenceAlert.findActiveCriticalAlertsForActiveTourists();
+        console.log(`✅ Found ${alerts.length} critical alerts for active tourists (using efficient query)`);
+        
+        // Convert aggregation results back to alert format
+        const formattedAlerts = alerts.map(aggregateResult => {
+          // The aggregation result contains the alert fields at the top level
+          return this.formatAlertForAPI(aggregateResult);
+        });
+        
+        return formattedAlerts;
+        
+      } catch (aggregationError) {
+        console.warn('⚠️ Aggregation query failed, falling back to filter method:', aggregationError.message);
+        
+        // Fallback to the previous method
+        const allAlerts = await GeofenceAlert.findActiveCriticalAlerts();
+        console.log(`📊 Found ${allAlerts.length} critical alerts in database (fallback method)`);
+        
+        if (allAlerts.length === 0) {
+          return [];
+        }
+        
+        // Get Tourist model to check active status
+        const Tourist = require('../models/Tourist') || require('../server').Tourist;
+        
+        // Get list of active tourist IDs
+        const activeTourists = await Tourist.find({ isActive: true }).select('blockchainId').lean();
+        const activeTouristIds = new Set(activeTourists.map(t => t.blockchainId));
+        console.log(`👥 Found ${activeTouristIds.size} active tourists:`, Array.from(activeTouristIds));
+        
+        // Filter alerts to only include those from active tourists
+        const filteredAlerts = allAlerts.filter(alert => {
+          const isActive = activeTouristIds.has(alert.touristId);
+          if (!isActive) {
+            console.log(`🚫 Filtering out alert for inactive tourist ${alert.touristId} (${alert.touristName})`);
+          }
+          return isActive;
+        });
+        
+        console.log(`✅ Returning ${filteredAlerts.length} critical alerts for active tourists only (fallback)`);
+        return filteredAlerts.map(alert => this.formatAlertForAPI(alert));
+      }
+      
     } catch (error) {
-      console.error('Error getting critical alerts:', error);
+      console.error('❌ Error getting critical alerts:', error);
       return [];
     }
   }
