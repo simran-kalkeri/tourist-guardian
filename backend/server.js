@@ -95,6 +95,26 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' })
 })
 
+// Debug endpoint to stop all IoT simulations
+app.post('/api/debug/stop-simulations', (req, res) => {
+  if (iotSimulation) {
+    iotSimulation.stopAllSimulations()
+    res.json({ success: true, message: 'All IoT simulations stopped' })
+  } else {
+    res.json({ success: false, message: 'IoT simulation service not available' })
+  }
+})
+
+// Debug endpoint to get simulation stats
+app.get('/api/debug/simulation-stats', (req, res) => {
+  if (iotSimulation) {
+    const stats = iotSimulation.getSimulationStats()
+    res.json({ success: true, stats })
+  } else {
+    res.json({ success: false, message: 'IoT simulation service not available' })
+  }
+})
+
 // Authentication endpoints
 app.post('/api/auth/login', (req, res) => {
   try {
@@ -486,14 +506,16 @@ app.post("/api/tourists/register", auditRegistration, async (req, res) => {
       tripEnd: new Date(tripEnd),
       emergencyContact,
       itinerary: resolvedItinerary,
-      simulationMode: true,
+      simulationMode: false, // 🔥 CHANGED: Disable simulation for real tourists
+      deviceTracked: false, // Will be set to true when mobile app sends location
       // Initialize display coords to actual location
       displayLatitude: (resolvedItinerary[0]?.lat ?? 26.2006),
       displayLongitude: (resolvedItinerary[0]?.lng ?? 92.9376),
       // Set actual coordinates for immediate display
       latitude: (resolvedItinerary[0]?.lat ?? 26.2006),
       longitude: (resolvedItinerary[0]?.lng ?? 92.9376),
-      flags: { simulated: true },
+      locationSource: 'device', // 🔥 CHANGED: Expect real device locations
+      flags: { simulated: false }, // 🔥 CHANGED: Mark as real tourist
       assignedWallet: {
         address: assignedWallet.address,
         index: assignedWallet.index,
@@ -544,9 +566,11 @@ app.post("/api/tourists/register", auditRegistration, async (req, res) => {
       { upsert: true }
     )
 
-    if (iotSimulation) {
-      await iotSimulation.addTouristToSimulation(tourist)
-    }
+    // 🔥 REMOVED: Don't add real tourists to IoT simulation
+    // Real tourists will send GPS data from mobile app
+    // if (iotSimulation) {
+    //   await iotSimulation.addTouristToSimulation(tourist)
+    // }
 
     res.status(201).json({
       success: true,
@@ -645,15 +669,14 @@ app.post("/api/tourists/:id/location", async (req, res) => {
       })
     }
     
-    // Check if tourist is in simulation mode and not device tracked - ignore device updates
-    // UNLESS forceGeofenceTest is true (for testing geofence functionality)
-    if (existing && existing.simulationMode && !existing.deviceTracked && !forceGeofenceTest) {
-      return res.json({ 
-        success: true, 
-        ignored: true, 
-        reason: 'simulation_mode',
-        message: 'Device location ignored - tourist is in simulation mode'
-      })
+    // 🔥 CHANGED: Always accept real device locations for active tourists
+    // Simulation should not override real GPS data from mobile apps
+    console.log(`📍 Accepting GPS location update for tourist ${id}: ${latitude}, ${longitude}`);
+    
+    // Optional: Stop simulation if it's running for this tourist
+    if (iotSimulation && existing.simulationMode) {
+      console.log(`⏹️ Stopping IoT simulation for tourist ${id} (real GPS received)`);
+      iotSimulation.stopTouristSimulation(Number(id));
     }
     
     if (forceGeofenceTest) {
@@ -686,6 +709,7 @@ app.post("/api/tourists/:id/location", async (req, res) => {
         locationSource: 'device',
         deviceTracked: true,
         lastDeviceFixAt: new Date(),
+        simulationMode: false, // 🔥 Mark as real tracking when GPS received
       },
       { new: true },
     )
@@ -706,9 +730,10 @@ app.post("/api/tourists/:id/location", async (req, res) => {
     } catch {}
 
     // OLD GEOFENCING - Use the old service for checking zones
+    let geofenceResult = { zones: [], isInZone: false, alert_required: false }
     try {
       const GeoFencingService = require('./services/geoFencingService')
-      const geofenceResult = await GeoFencingService.checkTouristLocation(
+      geofenceResult = await GeoFencingService.checkTouristLocation(
         Number(id), 
         latitude, 
         longitude, 

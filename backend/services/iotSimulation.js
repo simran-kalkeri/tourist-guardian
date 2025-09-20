@@ -244,10 +244,14 @@ class IoTSimulationService {
         return
       }
 
-      const activeTourists = await this.Tourist.find({ isActive: true })
-      console.log(`Starting IoT simulations for ${activeTourists.length} active tourists`)
+      // 🔥 FIXED: Only simulate tourists that are in simulation mode
+      const simulatedTourists = await this.Tourist.find({ 
+        isActive: true, 
+        simulationMode: true 
+      })
+      console.log(`Starting IoT simulations for ${simulatedTourists.length} tourists (simulation mode only)`)
 
-      for (const tourist of activeTourists) {
+      for (const tourist of simulatedTourists) {
         await this.startTouristSimulation(tourist)
       }
 
@@ -281,7 +285,8 @@ class IoTSimulationService {
 
   // Add new tourist to simulation
   async addTouristToSimulation(tourist) {
-    if (this.isRunning && tourist.isActive) {
+    // 🔥 FIXED: Only add tourists that are in simulation mode
+    if (this.isRunning && tourist.isActive && tourist.simulationMode) {
       await this.startTouristSimulation(tourist)
     }
   }

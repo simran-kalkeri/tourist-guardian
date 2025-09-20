@@ -6,7 +6,7 @@ import { Platform } from 'react-native'
 // Fallback to common emulator IPs, else require user LAN IP
 const API_BASE =
   process.env.EXPO_PUBLIC_API_BASE_URL ||
-  (Platform.OS === 'android' ? 'http://10.0.2.2:5000' : 'http://127.0.0.1:5000')
+  (Platform.OS === 'android' ? 'http://10.1.23.4:5000' : 'http://127.0.0.1:5000')
 
 export default function RegistrationScreen({ navigation }) {
   const [name, setName] = useState('')

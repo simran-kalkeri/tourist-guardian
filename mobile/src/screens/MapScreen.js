@@ -8,7 +8,7 @@ import { Platform } from 'react-native'
 // Configurable API base for Expo Go; falls back to emulator/localhost
 const API_BASE =
   process.env.EXPO_PUBLIC_API_BASE_URL ||
-  (Platform.OS === 'android' ? 'http://10.0.2.2:5000' : 'http://127.0.0.1:5000')
+  (Platform.OS === 'android' ? 'http://10.1.23.4:5000' : 'http://127.0.0.1:5000')
 let WS_URL
 try {
   const u = new URL(API_BASE)
@@ -27,38 +27,139 @@ function isInNE(lat, lng) {
 export default function MapScreen({ route }) {
   const { tourist } = route.params
   const touristId = tourist?.blockchainId || tourist?.id
-  const [coords, setCoords] = useState({ latitude: 26.2006, longitude: 92.9376 })
+  // Start with general India center instead of NE India specific
+  const [coords, setCoords] = useState({ latitude: 20.5937, longitude: 78.9629 })
   const [zones, setZones] = useState([])
-  const [tracking, setTracking] = useState(false)
+  const [tracking, setTracking] = useState(true) // 🔥 Start tracking by default
+  const [locationStatus, setLocationStatus] = useState('GPS Not Ready');
+  const [locationAccuracy, setLocationAccuracy] = useState(null);
   const wsRef = useRef(null)
   const webviewRef = useRef(null)
 
   useEffect(() => {
     (async () => {
+      setLocationStatus('Requesting location permission...')
+      
       const { status } = await Location.requestForegroundPermissionsAsync()
       if (status !== 'granted') {
-        Alert.alert('Permission denied', 'Location permission is required')
+        setLocationStatus('❌ Location permission denied')
+        Alert.alert('Permission Required', 'Location permission is required for real-time safety tracking. Please enable it in settings.')
+        setTracking(false)
         return
       }
-      const loc = await Location.getCurrentPositionAsync({})
-      const lat = loc.coords.latitude
-      const lng = loc.coords.longitude
-      setCoords(isInNE(lat, lng) ? { latitude: lat, longitude: lng } : NE_CENTER)
-      fetch(`${API_BASE}/api/zones`).then(r=>r.json()).then(d=>{ if(d.success) setZones(d.zones) })
+      
+      setLocationStatus('Getting initial GPS location...')
+      try {
+        const loc = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.High,
+          timeout: 10000 // 10 second timeout
+        })
+        const lat = loc.coords.latitude
+        const lng = loc.coords.longitude
+        
+        console.log('✅ Initial GPS location obtained:', lat, lng)
+        // 🔥 FIXED: Always use real GPS coordinates, don't restrict to NE India
+        setCoords({ latitude: lat, longitude: lng })
+        setLocationAccuracy(loc.coords.accuracy)
+        setLocationStatus(`✅ GPS Ready - Accuracy: ${Math.round(loc.coords.accuracy || 0)}m`)
+        
+        // Send initial location to backend
+        try {
+          await fetch(`${API_BASE}/api/tourists/${touristId}/location`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              latitude: lat, 
+              longitude: lng,
+              source: 'initial_gps',
+              timestamp: new Date().toISOString()
+            })
+          })
+          console.log('✅ Initial location sent to backend')
+        } catch (error) {
+          console.error('❌ Failed to send initial location:', error)
+        }
+        
+      } catch (error) {
+        console.error('❌ Failed to get initial location:', error)
+        setLocationStatus('⚠️ GPS location failed - using default India center')
+        // Use general India center instead of just NE India
+        setCoords({ latitude: 20.5937, longitude: 78.9629 }) // India center
+      }
+      
+      // Load risk zones
+      try {
+        const response = await fetch(`${API_BASE}/api/zones`)
+        const data = await response.json()
+        if (data.success) {
+          setZones(data.zones)
+          console.log('✅ Loaded', data.zones.length, 'risk zones')
+        }
+      } catch (error) {
+        console.error('❌ Failed to load risk zones:', error)
+      }
     })()
-  }, [])
+  }, [touristId])
 
   useEffect(() => {
     if (!tracking) return
+    console.log('📍 Starting real-time GPS tracking for tourist:', touristId)
+    
+    // Connect WebSocket for real-time updates
     wsRef.current = new WebSocket(WS_URL)
-    const sub = Location.watchPositionAsync({ accuracy: Location.Accuracy.Balanced, timeInterval: 5000, distanceInterval: 10 }, async (loc) => {
-      const { latitude, longitude } = loc.coords
-      setCoords(isInNE(latitude, longitude) ? { latitude, longitude } : NE_CENTER)
-      // send to backend
-      try { await fetch(`${API_BASE}/api/tourists/${touristId}/location`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ latitude, longitude }) }) } catch {}
+    wsRef.current.onopen = () => console.log('✅ WebSocket connected')
+    wsRef.current.onerror = (error) => console.error('❌ WebSocket error:', error)
+    
+    // Start GPS tracking with higher accuracy and more frequent updates
+    const sub = Location.watchPositionAsync({ 
+      accuracy: Location.Accuracy.High, // 🔥 Higher accuracy for real tracking
+      timeInterval: 3000, // 🔥 Update every 3 seconds (was 5)
+      distanceInterval: 5 // 🔥 Update every 5 meters (was 10)
+    }, async (loc) => {
+      const { latitude, longitude, accuracy } = loc.coords
+      const timestamp = new Date().toISOString()
+      
+      console.log(`📡 GPS Update: ${latitude.toFixed(6)}, ${longitude.toFixed(6)} (accuracy: ${accuracy}m)`)
+      
+      // Update location status with accuracy
+      setLocationAccuracy(accuracy)
+      setLocationStatus(`✅ GPS Active - Accuracy: ${Math.round(accuracy || 0)}m`)
+      
+      // Update local coordinates with real GPS data
+      // 🔥 FIXED: Always use real GPS coordinates, don't restrict to NE India
+      setCoords({ latitude, longitude })
+      
+      // Send to backend with more details
+      try {
+        const response = await fetch(`${API_BASE}/api/tourists/${touristId}/location`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            latitude, 
+            longitude, 
+            accuracy,
+            timestamp,
+            source: 'mobile_gps'
+          })
+        })
+        
+        if (response.ok) {
+          const result = await response.json()
+          console.log('✅ Location update sent successfully:', result)
+        } else {
+          console.error('❌ Location update failed:', response.status, response.statusText)
+        }
+      } catch (error) {
+        console.error('❌ Network error sending location:', error)
+      }
     })
-    return () => { sub.then(w=>w.remove()); wsRef.current && wsRef.current.close() }
-  }, [tracking])
+    
+    return () => { 
+      console.log('⏹️ Stopping GPS tracking for tourist:', touristId)
+      sub.then(w => w.remove())
+      if (wsRef.current) wsRef.current.close()
+    }
+  }, [tracking, touristId])
 
   const triggerSOS = async () => {
     try {
@@ -92,7 +193,7 @@ export default function MapScreen({ route }) {
           days_trip_duration: 5
         }]
       }
-      const res = await fetch('http://10.0.2.2:5000/api/ml/predict', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+      const res = await fetch('http://192.168.221.1:5000/api/ml/predict', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
       const data = await res.json()
       if (data.success) {
         const r = data.results[0]
@@ -146,11 +247,18 @@ export default function MapScreen({ route }) {
           onMessage={() => {}}
         />
       </View>
-      <View style={{ position:'absolute', top: 40, left: 16, right: 16, backgroundColor:'#ffffff', padding: 12, borderRadius: 8, elevation: 2, flexDirection:'row', justifyContent:'space-between', alignItems:'center' }}>
-        <Text>Real-time Tracking</Text>
-        <Switch value={tracking} onValueChange={setTracking} />
-        <Button title="Safety" onPress={requestSafetyScore} />
-        <Button title="SOS" color="#dc2626" onPress={triggerSOS} />
+      <View style={{ position:'absolute', top: 40, left: 16, right: 16, backgroundColor:'#ffffff', padding: 12, borderRadius: 8, elevation: 2 }}>
+        <View style={{ flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom: 8 }}>
+          <Text style={{ fontSize: 16, fontWeight: 'bold' }}>GPS Tracking</Text>
+          <Switch value={tracking} onValueChange={setTracking} />
+        </View>
+        <Text style={{ fontSize: 12, color: tracking ? '#10b981' : '#f59e0b', marginBottom: 8 }}>
+          {locationStatus}
+        </Text>
+        <View style={{ flexDirection:'row', justifyContent:'space-between' }}>
+          <Button title="Safety Score" onPress={requestSafetyScore} />
+          <Button title="🆘 SOS" color="#dc2626" onPress={triggerSOS} />
+        </View>
       </View>
     </View>
   )
